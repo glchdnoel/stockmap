@@ -82,6 +82,29 @@ class SyncTest(unittest.TestCase):
         for secret in ("123-45-678901", "999-99-999999", "secret-xyz", "jwt.token.x"):
             self.assertNotIn(secret, text)                      # 계좌번호·키·토큰 미노출
 
+    def test_name_from_holdings_response(self):
+        # 토스 보유 종목 응답(HoldingsItem)의 name 필드만 써요. 없으면 비워 둬요(None). 추가 호출 없음.
+        items = [
+            {"symbol": "000660", "name": " SK하이닉스\u202e ", "currency": "KRW", "quantity": 1, "averagePurchasePrice": 1},
+            {"symbol": "005930", "currency": "KRW", "quantity": 1, "averagePurchasePrice": 1},
+            {"symbol": "035420", "name": "", "currency": "KRW", "quantity": 1, "averagePurchasePrice": 1},
+            {"symbol": "373220", "name": "가" * 30, "currency": "KRW", "quantity": 1, "averagePurchasePrice": 1},
+            {"symbol": "VOO", "name": None, "currency": "USD", "quantity": 1, "averagePurchasePrice": 1},
+            {"symbol": "VOO", "name": "Vanguard S&P 500", "currency": "USD", "quantity": 1, "averagePurchasePrice": 1},
+        ]
+        out, _ = s.build_holdings(items, {})
+        by = {h["symbol"]: h["name"] for h in out}
+        self.assertEqual(by["000660"], "SK하이닉스")       # 앞뒤 공백·제어 문자 제거
+        self.assertIsNone(by["005930"])                    # 응답에 없으면 비워 둠
+        self.assertIsNone(by["035420"])                    # 빈 문자열도 비워 둠
+        self.assertEqual(by["373220"], "가" * 20)          # 20자 제한
+        self.assertEqual(by["VOO"], "Vanguard S&P 500")   # 다른 계좌 응답에 이름이 있으면 그 값
+        code, calls, tmp, printed = self.run_sync()
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(len(calls), 4)                    # 토큰 1 + 계좌 1 + 보유 종목 2 (이름 때문에 늘어난 호출 없음)
+        data = {h["symbol"]: h for h in json.loads(tmp.read_text())["holdings"]}
+        self.assertEqual(data["000660"]["name"], "SK하이닉스")
+
     def test_symlink_target_untouched(self):
         d = Path(tempfile.mkdtemp())
         victim = d / "victim.txt"
