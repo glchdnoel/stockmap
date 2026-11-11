@@ -66,7 +66,8 @@ def keychain_get(account):
 def keychain_set_interactive(account, label):
     print(f"\n{label}을(를) 붙여넣고 Enter를 누르세요. 화면에는 보이지 않아요. (확인을 위해 두 번 물어봐요)")
     # -w를 마지막에 두면 security가 직접 입력을 받아요. 비밀값이 이 프로그램이나 명령어 기록을 거치지 않아요.
-    r = subprocess.run([SECURITY_BIN, "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE,
+    # -T "": 허용 앱 목록을 비워서, 어떤 프로그램이든 키를 읽을 때마다 맥이 허락을 물어요.
+    r = subprocess.run([SECURITY_BIN, "add-generic-password", "-U", "-T", "", "-s", KEYCHAIN_SERVICE,
                         "-a", account, "-l", f"StockMap 토스증권 {label}", "-w"])
     if r.returncode != 0:
         raise SyncError("키체인에 저장하지 못했어요.")
@@ -209,8 +210,11 @@ def build_holdings(items, groups):
         else:
             country = it.get("marketCountry")
             default_group = "미국" if country == "US" else ("한국" if country == "KR" else "기타")
+            name = it.get("name")
             merged[sym] = {"qty": qty, "avg": avg, "last": last if last and last > 0 else None,
-                           "cur": cur, "group": groups.get(sym) or default_group}
+                           "cur": cur, "group": groups.get(sym) or default_group,
+                           # 종목명은 표시용. 스톡맵이 가져올 때 한 번 더 검사해요.
+                           "name": name.strip()[:20] if isinstance(name, str) and name.strip() else None}
     out = []
     for sym, m in merged.items():
         out.append({
@@ -219,6 +223,7 @@ def build_holdings(items, groups):
             "shares": float(m["qty"]),
             "avgPrice": round(float(m["avg"]), 4),
             "group": m["group"],
+            "name": m["name"],
             # 토스증권 현재가를 '직접 입력 가격'으로 넣어 둬요. 한국 종목은 이 값으로 표시되고,
             # 미국 종목은 Finnhub 실시간 가격이 있으면 그걸 우선 써요.
             "manualPrice": round(float(m["last"]), 4) if m["last"] is not None else None,
