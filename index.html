@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- 보안: 이 페이지가 불러올 수 있는 것을 화이트리스트로 제한합니다 (SECURITY.md 참고) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://finnhub.io wss://ws.finnhub.io; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#0f1115">
+  <title>스톡맵 · 내 포트폴리오</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <!-- d3-hierarchy v3.1.2 (자체 호스팅 + 무결성 해시 검증) -->
+  <script src="vendor/d3-hierarchy.min.js" integrity="sha256-qHcTgEVL6J7F/+mmOWunwkcIHjSK50DcnLlimr1MDkM=" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true">▦</span> 내 포트폴리오</div>
+    <div class="stat">
+      <span class="label">총 평가액</span>
+      <span id="total" class="value">-</span>
+      <button id="maskBtn" class="icon-btn" type="button" aria-label="금액 가리기/보이기">👁</button>
+    </div>
+    <div class="stat">
+      <span class="label">오늘</span>
+      <span id="today" class="value">-</span>
+    </div>
+    <div class="spacer"></div>
+    <span id="market" class="badge">-</span>
+    <span id="conn" class="badge">-</span>
+    <span id="updated" class="muted">-</span>
+    <button id="manageBtn" class="btn" type="button">종목 관리</button>
+    <button id="settingsBtn" class="btn" type="button">설정</button>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+  <main id="map" class="map" aria-label="포트폴리오 히트맵"></main>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+  <!-- 종목 관리 -->
+  <dialog id="manageDlg" class="dlg">
+    <h2>종목 관리</h2>
+    <form id="addForm" class="grid-form" autocomplete="off" novalidate>
+      <label>티커 <input id="fSymbol" required maxlength="15" placeholder="예: VOO" spellcheck="false"></label>
+      <label>통화
+        <select id="fCurrency">
+          <option value="USD">USD (미국)</option>
+          <option value="KRW">KRW (한국)</option>
+        </select>
+      </label>
+      <label>보유 수량 <input id="fShares" type="number" step="any" min="0" required></label>
+      <label>평균 단가 <input id="fAvg" type="number" step="any" min="0" required></label>
+      <label>그룹(테마) <input id="fGroup" maxlength="20" placeholder="예: 미국 지수"></label>
+      <label>현재가 직접 입력 <input id="fManual" type="number" step="any" min="0" placeholder="선택 (한국 주식용)"></label>
+      <button class="btn primary" type="submit">추가</button>
+    </form>
+    <p id="formMsg" class="form-msg" aria-live="polite"></p>
+    <div class="table-wrap">
+      <table class="holdings">
+        <thead><tr><th>티커</th><th>통화</th><th>수량</th><th>평단</th><th>그룹</th><th></th></tr></thead>
+        <tbody id="holdingsBody"></tbody>
+      </table>
+    </div>
+    <div class="dlg-actions">
+      <button id="exportBtn" class="btn" type="button">내보내기(JSON)</button>
+      <label class="btn file-btn">가져오기(JSON)<input id="importFile" type="file" accept="application/json,.json"></label>
+      <div class="spacer"></div>
+      <button class="btn" type="button" data-close="manageDlg">닫기</button>
+    </div>
+  </dialog>
+
+  <!-- 설정 -->
+  <dialog id="settingsDlg" class="dlg">
+    <h2>설정</h2>
+    <section class="setting">
+      <h3>Finnhub API 키</h3>
+      <p class="muted small">키는 이 브라우저(localStorage)에만 저장되며 GitHub나 다른 곳으로 전송되지 않아요. 공용 PC에서는 쓰고 나서 꼭 삭제하세요.</p>
+      <p id="keyStatus" class="small"></p>
+      <form id="keyForm" class="row" autocomplete="off" novalidate>
+        <input id="fKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
+        <button class="btn primary" type="submit">저장</button>
+        <button id="deleteKeyBtn" class="btn danger" type="button">삭제</button>
+      </form>
+    </section>
+    <section class="setting">
+      <h3>표시</h3>
+      <label class="row">USD → KRW 환율 <input id="fFx" type="number" step="any" min="1" max="100000"></label>
+      <label class="row">색상 최대 기준(±%) <input id="fRange" type="number" step="0.5" min="0.5" max="20"></label>
+      <label class="row"><input id="fDemo" type="checkbox"> 데모 화면 보기 (가상 데이터)</label>
+    </section>
+    <p id="settingsMsg" class="form-msg" aria-live="polite"></p>
+    <div class="dlg-actions">
+      <div class="spacer"></div>
+      <button id="saveSettingsBtn" class="btn primary" type="button">적용</button>
+      <button class="btn" type="button" data-close="settingsDlg">닫기</button>
+    </div>
+  </dialog>
+
+  <noscript><p class="banner">이 앱은 JavaScript가 필요해요.</p></noscript>
+</body>
+</html>
