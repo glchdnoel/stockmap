@@ -90,7 +90,8 @@
     const avgPrice = toNumber(raw.avgPrice, { min: 0, max: 1e10 });
     const manualPrice = toNumber(raw.manualPrice, { min: 0, max: 1e10, allowEmpty: true });
     const group = cleanText(raw.group, 20) || '기타';
-    return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice };
+    const name = cleanText(raw.name, 20) || null; // 선택: 종목명 (숫자 코드 옆에 표시)
+    return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice, name };
   }
   function validateSettings(raw) {
     const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true };
@@ -371,7 +372,7 @@
       const color = colorFor(r.dp);
       ref.box.classList.toggle('nodata', !color);
       ref.box.style.backgroundColor = color || '';
-      ref.sym.textContent = size === 'xs' ? '' : r.h.symbol;
+      ref.sym.textContent = size === 'xs' ? '' : (r.h.name ? `${r.h.symbol} ${r.h.name}` : r.h.symbol);
       ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : leafStatus(r));
       ref.val.textContent = size === 'l' ? fmtKRW(r.value) : '';
       const prev = state.lastPrice.get(r.h.symbol);
@@ -389,7 +390,7 @@
     let total = 0; let change = 0; let base = 0;
     for (const r of rows) { total += r.value; change += r.dayChange; base += r.dayBase; }
     ui.total.textContent = fmtKRW(total);
-    ui.maskBtn.textContent = state.settings.masked ? '보기' : '숨기기';
+    ui.maskBtn.textContent = state.settings.masked ? '금액 보기' : '금액 숨기기';
     $('periodLabel').textContent = PERIODS[state.settings.period];
     document.querySelectorAll('.period-btn').forEach((b) => b.classList.toggle('active', b.dataset.period === state.settings.period));
     const pct = base > 0 ? (change / base) * 100 : NaN;
@@ -423,16 +424,18 @@
       const h = activeHoldings().find((x) => x.symbol === sym);
       if (!h) return;
       const r = computeRow(h);
+      const masked = state.settings.masked;
       const rowsData = [
-        ['현재가', fmtPrice(r.price, h.currency) + (r.live ? '' : ' (직접입력/평단)')],
+        ['현재가', masked ? '••••' : fmtPrice(r.price, h.currency) + (r.live ? '' : ' (직접입력/평단)')],
         [PERIODS[state.settings.period] + ' 등락', fmtPct(r.dp)],
         ['기준가', r.base && !r.base.missing ? `${fmtPrice(r.base.price, h.currency)} · ${r.base.label}` : '—'],
-        ['보유 수량', nfNum.format(h.shares)],
-        ['평균 단가', fmtPrice(h.avgPrice, h.currency)],
+        ['보유 수량', masked ? '••••' : nfNum.format(h.shares)],
+        ['평균 단가', masked ? '••••' : fmtPrice(h.avgPrice, h.currency)],
         ['평가액', fmtKRW(r.value)],
         ['평가손익', Number.isFinite(r.pnl) ? fmtSignedKRW(r.pnl) : '—'],
       ];
-      const nodes = [el('div', 'tt-title', `${h.symbol} · ${h.group}`)];
+      if (!r.live && h.manualPrice) rowsData.push(['수동 가격', '실시간 시세 대신 직접 입력한 가격이라 등락(%)은 표시되지 않아요.']);
+      const nodes = [el('div', 'tt-title', `${h.symbol}${h.name ? ' ' + h.name : ''} · ${h.group}`)];
       for (const [k, v] of rowsData) {
         const row = el('div', 'tt-row');
         row.append(el('span', '', k), el('span', '', v));
@@ -709,11 +712,11 @@
       { symbol: 'SOXX', currency: 'USD', shares: 5, avgPrice: 210, group: '반도체', manualPrice: null },
       { symbol: 'SMH', currency: 'USD', shares: 2, avgPrice: 240, group: '반도체', manualPrice: null },
       { symbol: 'TLT', currency: 'USD', shares: 6, avgPrice: 90, group: '채권', manualPrice: null },
-      { symbol: '000660', currency: 'KRW', shares: 3, avgPrice: 180000, group: '한국', manualPrice: 205000 },
+      { symbol: '000660', currency: 'KRW', shares: 3, avgPrice: 180000, group: '한국', manualPrice: 205000, name: 'SK하이닉스' },
     ],
     base: { VOO: 500, QQQ: 470, VTI: 270, SCHD: 27, JEPI: 56, SOXX: 225, SMH: 255, TLT: 88 },
   };
-  const DEMO_BANNER = '예시 화면이에요. [종목 관리]에서 내 종목을 넣으면 내 포트폴리오로 바뀌어요.';
+  const DEMO_BANNER = '예시 화면이에요. [종목 관리]에서 보유 종목을 넣으면 내 포트폴리오로 바뀌어요.';
   function startDemo(runId) {
     state.quotes.clear();
     const spread = { '1h': 0.012, day: 0.05, '1w': 0.1, '1m': 0.2, '3m': 0.3, '6m': 0.4, '1y': 0.6, '3y': 1.0 };
