@@ -15,32 +15,15 @@
 > 맥북에서만 도는 프로그램으로 만들어줘 (토스증권 계좌 → 웹앱)
 → `mac-sync/stockmap_sync.py`: 토스증권 Open API 공식 문서(openapi.tossinvest.com)의 /oauth2/token, /api/v1/accounts, /api/v1/holdings만 사용
 
+추가 요청:
+> 내가 해야할 일을 aside에 맡길 생각인데, 프롬포트를 짜줬으면 해. 또한 보안적으로 안전하게 하네스를 걸 수 있는 프롬포트도 포함되어야 해
+→ `ASIDE_PROMPTS.md`
+
 참고한 사진: 트리맵 히트맵 화면 (박스 크기 = 비중, 색 = 등락률, 테마별 그룹, 상단에 총 평가액·오늘 수익률).
 
 ## 2. 사용한 외부 코드
 - **d3-hierarchy v3.1.2** (D3 프로젝트, ISC 라이선스): 트리맵 배치 계산에만 사용해요. D3는 GitHub 스타 10만 개 이상인 대표적인 시각화 라이브러리예요.
 - 그 외 코드는 모두 직접 작성했어요 (`app.js`, `style.css`, `index.html`).
 
-## 3. Aside용 프롬프트 (복사해서 사용)
-
-### A. 보안 점검
-```
-https://github.com/glchdnoel/stockmap 저장소의 코드를 보안 관점에서 검토해줘.
-이 앱은 서버 없이 GitHub Pages에서 동작하는 개인용 주식 히트맵이고, Finnhub API 키와 보유 종목을 브라우저 localStorage에 저장해.
-다음을 중점적으로 확인하고, 문제마다 [심각도: 높음/중간/낮음], 파일·줄 위치, 고치는 방법을 알려줘.
-1) innerHTML, eval, 인라인 이벤트 등 XSS 가능성
-2) index.html의 Content-Security-Policy가 충분히 엄격한지
-3) API 키가 finnhub.io·api.twelvedata.com 외의 곳으로 전송되거나 저장소·내보내기 파일에 들어갈 가능성
-4) 외부 입력(웹소켓 메시지, 가져오기 JSON, localStorage) 검증 누락
-5) vendor/d3-hierarchy.min.js가 공식 배포본과 같은지 (SRI 해시 비교)
-문제가 없으면 "발견 없음"이라고 분명히 말해줘. 추측은 추측이라고 표시해줘.
-```
-
-### B. 배포된 사이트 동작 점검
-```
-https://glchdnoel.github.io/stockmap/ 를 열어서 확인해줘.
-1) 데모 화면에서 박스가 보이고, 상단 1시간~3년 기간 버튼을 누르면 색과 %가 바뀌는지
-2) 개발자 도구 콘솔에 CSP 위반이나 오류가 있는지
-3) 네트워크 탭에서 glchdnoel.github.io, finnhub.io, api.twelvedata.com 말고 다른 곳으로 요청이 가는지
-본 그대로만 보고하고, 설정이나 키 입력은 하지 마.
-```
+## 3. Aside용 프롬프트
+안전 규칙(하네스)과 작업별 프롬프트는 [`ASIDE_PROMPTS.md`](ASIDE_PROMPTS.md)에 모아 두었어요.
