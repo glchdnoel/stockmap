@@ -336,7 +336,7 @@ def cmd_sync(out_path):
         raise SyncError("보유 종목이 없어요.")
     path = write_output(holdings, out_path)
     print(f"\n완료! {len(holdings)}종목을 저장했어요 → {path}")
-    print("스톡맵 → 종목 관리 → 가져오기(JSON)에서 이 파일을 선택하세요. 가져온 뒤 파일은 지워도 돼요.")
+    print("스톡맵 → 종목 관리 → 가져오기(JSON)에서 이 파일을 선택하세요. 기억하기를 끈 경우 다음에도 이 파일이 필요하니 보관하세요.")
 
 
 def main(argv=None):
