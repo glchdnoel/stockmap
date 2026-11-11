@@ -94,13 +94,14 @@
     return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice, name };
   }
   function validateSettings(raw) {
-    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true };
+    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true, rememberHoldings: false };
     if (!raw || typeof raw !== 'object') return s;
     try { s.fxRate = toNumber(raw.fxRate, { min: 1, max: 100000 }); } catch (e) { /* 기본값 */ }
     try { s.range = toNumber(raw.range, { min: 0.5, max: 20 }); } catch (e) { /* 기본값 */ }
     s.masked = raw.masked === true;
     s.demo = raw.demo === true;
     s.rememberKeys = raw.rememberKeys !== false;
+    s.rememberHoldings = raw.rememberHoldings === true; // 기본값: 기억하지 않음
     if (Object.prototype.hasOwnProperty.call(PERIODS, raw.period)) s.period = raw.period;
     return s;
   }
@@ -137,12 +138,17 @@
           if (!seen.has(h.symbol)) { seen.add(h.symbol); state.holdings.push(h); }
         } catch (e) { /* 잘못된 항목은 버린다 */ }
       }
+      // 기억하기가 꺼져 있으면 이번 탭에서만 쓰고, 저장돼 있던 종목은 지운다.
+      if (!state.settings.rememberHoldings && Object.prototype.hasOwnProperty.call(data, 'holdings')) saveState();
     } catch (e) {
       showBanner('저장된 데이터를 읽지 못해 초기화했어요.', true);
     }
   }
   function saveState() {
-    storeSet(STORE_KEY, JSON.stringify({ version: 1, settings: state.settings, holdings: state.holdings }));
+    // 보유 종목(수량·평단·그룹)은 '기억하기'를 켠 때만 저장한다. 끄면 메모리에만 둔다.
+    const data = { version: 1, settings: state.settings };
+    if (state.settings.rememberHoldings) data.holdings = state.holdings;
+    storeSet(STORE_KEY, JSON.stringify(data));
   }
   // API 키: "기억하기"를 끄면 sessionStorage(탭을 닫으면 삭제)에 둔다.
   function sessGet(key) { try { return window.sessionStorage.getItem(key); } catch (e) { return memoryStore.get('s:' + key) ?? null; } }
@@ -891,6 +897,7 @@
     $('fRange').value = String(state.settings.range);
     $('fDemo').checked = state.settings.demo;
     $('fRemember').checked = state.settings.rememberKeys;
+    $('fRememberHoldings').checked = state.settings.rememberHoldings;
     ui.fKey.value = '';
     ui.settingsMsg.textContent = '';
     renderKeyStatus();
@@ -932,7 +939,8 @@
         if (a) writeKey(API_KEY_KEY, a);
         if (t) writeKey(TD_KEY_KEY, t);
       }
-      saveState();
+      state.settings.rememberHoldings = $('fRememberHoldings').checked;
+      saveState(); // 끄면 저장돼 있던 보유 종목이 여기서 지워져요
       ui.settingsMsg.textContent = '적용했어요.';
       restart();
     } catch (e) {
