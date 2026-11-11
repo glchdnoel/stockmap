@@ -192,7 +192,7 @@ with sync_playwright() as p:
     page.click("#wipeBtn"); page.wait_for_timeout(500)
     st = page.evaluate("() => [localStorage.length, sessionStorage.length]")
     check("모든 데이터 지우기", st == [0, 0], str(st))
-    check("금액 숨기기 버튼 글자", page.text_content("#maskBtn") == "숨기기", page.text_content("#maskBtn"))
+    check("금액 숨기기 버튼 글자", page.text_content("#maskBtn") == "금액 숨기기", page.text_content("#maskBtn"))
     b.close()
 
 fails = [r for r in results if not r[1]]
