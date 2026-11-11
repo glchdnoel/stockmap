@@ -41,6 +41,7 @@
     <span id="market" class="badge">-</span>
     <span id="conn" class="badge">-</span>
     <span id="updated" class="muted">-</span>
+    <span id="fxInfo" class="fx-info muted">-</span>
     <button id="manageBtn" class="btn" type="button">종목 관리</button>
     <button id="settingsBtn" class="btn" type="button">설정</button>
   </header>
@@ -53,7 +54,8 @@
   <dialog id="manageDlg" class="dlg">
     <h2>종목 관리</h2>
     <form id="addForm" class="grid-form" autocomplete="off" novalidate>
-      <label>티커 <input id="fSymbol" required maxlength="15" placeholder="예: VOO" spellcheck="false"></label>
+      <label>티커 <input id="fSymbol" required maxlength="15" placeholder="예: VOO, 000660" spellcheck="false"></label>
+      <label>종목명(선택) <input id="fName" maxlength="20" placeholder="예: SK하이닉스" spellcheck="false"></label>
       <label>통화
         <select id="fCurrency">
           <option value="USD">USD (미국)</option>
@@ -69,7 +71,7 @@
     <p id="formMsg" class="form-msg" aria-live="polite"></p>
     <div class="table-wrap">
       <table class="holdings">
-        <thead><tr><th>티커</th><th>통화</th><th>수량</th><th>평단</th><th>그룹</th><th></th></tr></thead>
+        <thead><tr><th>티커</th><th>종목명</th><th>통화</th><th>수량</th><th>평단</th><th>그룹</th><th></th></tr></thead>
         <tbody id="holdingsBody"></tbody>
       </table>
     </div>
@@ -106,7 +108,9 @@
     </section>
     <section class="setting">
       <h3>표시</h3>
-      <label class="row">USD → KRW 환율 <input id="fFx" type="number" step="any" min="1" max="100000"></label>
+      <label class="row"><input id="fFxAuto" type="checkbox"> 환율 자동</label>
+      <p class="muted small">켜면 앱을 열 때 Twelve Data에서 USD/KRW 환율을 한 번 받아요(키 필요). 못 받으면 마지막으로 받은 값이나 아래 직접 입력값을 써요.</p>
+      <label class="row">USD → KRW 환율(직접 입력) <input id="fFx" type="number" step="any" min="1" max="100000"></label>
       <label class="row">색상 최대 기준(±%) <input id="fRange" type="number" step="0.5" min="0.5" max="20"></label>
       <label class="row"><input id="fDemo" type="checkbox"> 예시 화면 보기</label>
     </section>
