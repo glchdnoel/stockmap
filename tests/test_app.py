@@ -255,12 +255,12 @@ with sync_playwright() as p:
     page.screenshot(path="./week.png")
     check("기억하기 켜면 과거 가격 캐시 저장", page.evaluate("() => localStorage.getItem('stockmap.hist.v1') !== null"))
     page.click("#settingsBtn"); page.uncheck("#fRememberHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    page.click("[data-close=settingsDlg]")  # '적용'은 창을 닫지 않아요(결과 문구를 보여 주는 설계). 뒤의 화면 클릭 전에 닫아요.
     st = page.evaluate("() => [localStorage.getItem('stockmap.hist.v1'), 'holdings' in JSON.parse(localStorage.getItem('stockmap.v1') || '{}')]")
     check("기억하기 끄면 과거 가격 캐시도 삭제", st == [None, False], str(st))
     page.click(".period-btn[data-period='1m']"); page.wait_for_timeout(2000)
     check("끄고 나서도 이번 탭에서는 캐시 사용(저장 안 함)", page.text_content(".leaf[data-symbol=VOO] .pct").endswith("%")
           and page.evaluate("() => localStorage.getItem('stockmap.hist.v1')") is None, page.text_content(".leaf[data-symbol=VOO] .pct"))
-    page.click("[data-close=settingsDlg]")
 
     # 7) 보안 설정: 키 기억 끄기, 전체 삭제
     page.on("dialog", lambda d: d.accept())
