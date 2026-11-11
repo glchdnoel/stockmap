@@ -56,9 +56,9 @@ def fake_keychain(account):
 
 
 class SyncTest(unittest.TestCase):
-    def run_sync(self):
+    def run_sync(self, out=None):
         calls = []
-        tmp = Path(tempfile.mkdtemp()) / "out.json"
+        tmp = Path(out) if out else Path(tempfile.mkdtemp()) / "out.json"
         with mock.patch.object(s, "keychain_get", fake_keychain), \
              mock.patch.object(s.OPENER, "open", fake_server(calls)), \
              mock.patch.object(s.time, "sleep", lambda x: None), \
@@ -81,6 +81,33 @@ class SyncTest(unittest.TestCase):
         text = tmp.read_text() + printed
         for secret in ("123-45-678901", "999-99-999999", "secret-xyz", "jwt.token.x"):
             self.assertNotIn(secret, text)                      # 계좌번호·키·토큰 미노출
+
+    def test_symlink_target_untouched(self):
+        d = Path(tempfile.mkdtemp())
+        victim = d / "victim.txt"
+        victim.write_text("original")
+        os.chmod(victim, 0o644)
+        out = d / "out.json"
+        os.symlink(victim, out)                                  # 결과 경로에 링크를 미리 만들어 둠
+        code, _, _, printed = self.run_sync(out)
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(victim.read_text(), "original")         # 링크 대상 내용 그대로
+        self.assertEqual(stat.S_IMODE(os.stat(victim).st_mode), 0o644)  # 링크 대상 권한 그대로
+        self.assertFalse(out.is_symlink())                       # 링크는 일반 파일로 교체됨
+        self.assertEqual(stat.S_IMODE(os.lstat(out).st_mode), 0o600)
+        self.assertIn("holdings", json.loads(out.read_text()))
+        self.assertEqual([p.name for p in d.iterdir() if p.suffix == ".tmp"], [])  # 임시 파일 없음
+
+    def test_refuses_writable_dir(self):
+        d = Path(tempfile.mkdtemp())
+        os.chmod(d, 0o777)                                       # 다른 사용자도 쓸 수 있는 폴더
+        try:
+            code, _, _, printed = self.run_sync(d / "out.json")
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual(code, 1, printed)
+        self.assertIn("다른 사용자", printed)
+        self.assertFalse((d / "out.json").exists())
 
     def test_only_allowed_calls(self):
         _, calls, _, _ = self.run_sync()
