@@ -32,6 +32,15 @@
   const RENDER_INTERVAL = 1000;   // 화면 갱신은 최대 1초에 한 번
   const RELAYOUT_INTERVAL = 15000; // 박스 크기 재배치는 15초에 한 번
   const QUOTE_REFRESH = 10 * 60 * 1000;
+  // 기간별 등락 (과거 가격은 Twelve Data 무료 요금제: 분당 8건, 하루 800건)
+  const TD_KEY_KEY = 'stockmap.tdkey';
+  const HIST_KEY = 'stockmap.hist.v1';
+  const TD_URL = 'https://api.twelvedata.com/time_series';
+  const TD_SPACING = 8000;                 // 8초에 1건 → 분당 7.5건
+  const DAILY_MAX_AGE = 6 * 60 * 60 * 1000; // 일봉은 6시간마다 새로
+  const PERIODS = { '1h': '1시간', day: '오늘', '1w': '1주', '1m': '1달' };
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/;
 
   const $ = (id) => document.getElementById(id);
   const ui = {
@@ -82,12 +91,13 @@
     return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice };
   }
   function validateSettings(raw) {
-    const s = { fxRate: 1400, range: 3, masked: false, demo: false };
+    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day' };
     if (!raw || typeof raw !== 'object') return s;
     try { s.fxRate = toNumber(raw.fxRate, { min: 1, max: 100000 }); } catch (e) { /* 기본값 */ }
     try { s.range = toNumber(raw.range, { min: 0.5, max: 20 }); } catch (e) { /* 기본값 */ }
     s.masked = raw.masked === true;
     s.demo = raw.demo === true;
+    if (Object.prototype.hasOwnProperty.call(PERIODS, raw.period)) s.period = raw.period;
     return s;
   }
 
@@ -103,6 +113,10 @@
     timers: [], runId: 0,
     lastRender: 0, renderPending: false, lastLayout: 0, layoutDirty: true,
     leafEls: new Map(), lastPrice: new Map(),
+    daily: new Map(),     // symbol -> { fetchedAt, bars: [[YYYY-MM-DD, close], ...] (최신순) }
+    intraday: new Map(),  // symbol -> { fetchedAt, bars: [[분 단위 시각, close, 'MM/DD HH:MM'], ...] (최신순) }
+    histUnsupported: new Set(),
+    demoBases: {},
   };
 
   function loadState() {
@@ -129,6 +143,28 @@
   function getApiKey() {
     const k = storeGet(API_KEY_KEY);
     return k && API_KEY_RE.test(k) ? k : null;
+  }
+  function getTdKey() {
+    const k = storeGet(TD_KEY_KEY);
+    return k && API_KEY_RE.test(k) ? k : null;
+  }
+  // 일봉 캐시 (가격 숫자만 저장, 형식 검사 후 사용)
+  function loadHistCache() {
+    try {
+      const data = JSON.parse(storeGet(HIST_KEY) || '{}');
+      if (!data || typeof data !== 'object') return;
+      for (const [sym, v] of Object.entries(data).slice(0, MAX_HOLDINGS)) {
+        if (!SYMBOL_RE.test(sym) || !v || !Array.isArray(v.bars) || !Number.isFinite(v.fetchedAt)) continue;
+        const bars = v.bars.slice(0, 40).filter((b) => Array.isArray(b) && DATE_RE.test(b[0]) && Number.isFinite(b[1]) && b[1] > 0);
+        if (bars.length) state.daily.set(sym, { fetchedAt: v.fetchedAt, bars });
+      }
+    } catch (e) { /* 캐시가 깨졌으면 무시 */ }
+  }
+  function saveHistCache() {
+    const keep = new Set(state.holdings.map((h) => h.symbol));
+    const out = {};
+    for (const [sym, v] of state.daily) if (keep.has(sym)) out[sym] = v;
+    storeSet(HIST_KEY, JSON.stringify(out));
   }
 
   // ---------------------------------------------------------------------------
@@ -186,18 +222,50 @@
   // ---------------------------------------------------------------------------
   function activeHoldings() { return state.mode === 'demo' ? DEMO.holdings : state.holdings; }
   function fx(h) { return h.currency === 'USD' ? state.settings.fxRate : 1; }
+
+  // 뉴욕 기준 날짜 문자열 (YYYY-MM-DD)
+  const nyDateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  function nyDate(ms) { return nyDateFmt.format(new Date(ms)); }
+
+  // 선택한 기간의 "기준가"를 찾는다. { price, label } 또는 null
+  function baseFor(symbol, q) {
+    const period = state.settings.period;
+    if (state.mode === 'demo') {
+      const b = state.demoBases[period] && state.demoBases[period][symbol];
+      return b ? { price: b, label: PERIODS[period] + ' 전 (가상)' } : null;
+    }
+    if (period === 'day') return q && q.prevClose > 0 ? { price: q.prevClose, label: '전일 종가' } : null;
+    if (period === '1w' || period === '1m') {
+      const d = state.daily.get(symbol);
+      if (!d) return null;
+      const target = nyDate(Date.now() - (period === '1w' ? 7 : 30) * 86400000);
+      const bar = d.bars.find((b) => b[0] <= target);
+      return bar ? { price: bar[1], label: `${bar[0].slice(5).replace('-', '/')} 종가` } : null;
+    }
+    if (period === '1h') {
+      const d = state.intraday.get(symbol);
+      if (!d || !d.bars.length) return null;
+      const target = d.bars[0][0] - 60;
+      const bar = d.bars.find((b) => b[0] <= target);
+      return bar ? { price: bar[1], label: `${bar[2]} 가격` } : null;
+    }
+    return null;
+  }
+
   function computeRow(h) {
     const q = state.quotes.get(h.symbol);
-    let price = null; let prevClose = null; let live = false;
-    if (q && q.supported && q.price > 0) { price = q.price; prevClose = q.prevClose > 0 ? q.prevClose : null; live = true; }
+    let price = null; let live = false;
+    if (q && q.supported && q.price > 0) { price = q.price; live = true; }
     else if (h.manualPrice != null && h.manualPrice > 0) { price = h.manualPrice; }
     const shownPrice = price ?? (h.avgPrice > 0 ? h.avgPrice : null);
     const value = (shownPrice ?? 0) * h.shares * fx(h);
-    const dp = price != null && prevClose ? ((price - prevClose) / prevClose) * 100 : NaN;
-    const dayChange = price != null && prevClose ? (price - prevClose) * h.shares * fx(h) : 0;
-    const dayBase = price != null && prevClose ? prevClose * h.shares * fx(h) : 0;
+    const base = live ? baseFor(h.symbol, q) : null;
+    const ok = price != null && base && base.price > 0;
+    const dp = ok ? ((price - base.price) / base.price) * 100 : NaN;
+    const dayChange = ok ? (price - base.price) * h.shares * fx(h) : 0;
+    const dayBase = ok ? base.price * h.shares * fx(h) : 0;
     const pnl = shownPrice != null && h.avgPrice > 0 ? (shownPrice - h.avgPrice) * h.shares * fx(h) : NaN;
-    return { h, price: shownPrice, prevClose, live, value, dp, dayChange, dayBase, pnl };
+    return { h, price: shownPrice, base, live, value, dp, dayChange, dayBase, pnl };
   }
   function colorFor(dp) {
     if (!Number.isFinite(dp)) return null;
@@ -284,7 +352,7 @@
       ref.box.classList.toggle('nodata', !color);
       ref.box.style.backgroundColor = color || '';
       ref.sym.textContent = size === 'xs' ? '' : r.h.symbol;
-      ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : (r.live ? '—' : (r.h.manualPrice ? '직접 입력' : '시세 없음')));
+      ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : (r.live ? (state.histUnsupported.has(r.h.symbol) && state.settings.period !== 'day' ? '기간 미지원' : '불러오는 중') : (r.h.manualPrice ? '직접 입력' : '시세 없음')));
       ref.val.textContent = size === 'l' ? fmtKRW(r.value) : '';
       const prev = state.lastPrice.get(r.h.symbol);
       if (prev != null && r.price != null && prev !== r.price) {
@@ -301,6 +369,8 @@
     let total = 0; let change = 0; let base = 0;
     for (const r of rows) { total += r.value; change += r.dayChange; base += r.dayBase; }
     ui.total.textContent = fmtKRW(total);
+    $('periodLabel').textContent = PERIODS[state.settings.period];
+    document.querySelectorAll('.period-btn').forEach((b) => b.classList.toggle('active', b.dataset.period === state.settings.period));
     const pct = base > 0 ? (change / base) * 100 : NaN;
     ui.today.textContent = Number.isFinite(pct) ? `${fmtSignedKRW(change)} (${fmtPct(pct)})` : '—';
     ui.today.classList.toggle('up', pct > 0);
@@ -334,7 +404,8 @@
       const r = computeRow(h);
       const rowsData = [
         ['현재가', fmtPrice(r.price, h.currency) + (r.live ? '' : ' (직접입력/평단)')],
-        ['오늘 등락', fmtPct(r.dp)],
+        [PERIODS[state.settings.period] + ' 등락', fmtPct(r.dp)],
+        ['기준가', r.base ? `${fmtPrice(r.base.price, h.currency)} · ${r.base.label}` : '—'],
         ['보유 수량', nfNum.format(h.shares)],
         ['평균 단가', fmtPrice(h.avgPrice, h.currency)],
         ['평가액', fmtKRW(r.value)],
@@ -467,6 +538,144 @@
   }
 
   // ---------------------------------------------------------------------------
+  // 과거 가격 (Twelve Data) — 한도를 지키는 대기열
+  // ---------------------------------------------------------------------------
+  const td = { queue: [], busy: false, last: 0, intradayTimer: null };
+
+  async function fetchSeries(symbol, interval, outputsize, key) {
+    const url = new URL(TD_URL);
+    url.searchParams.set('symbol', symbol);
+    url.searchParams.set('interval', interval);
+    url.searchParams.set('outputsize', String(outputsize));
+    url.searchParams.set('timezone', 'America/New_York');
+    url.searchParams.set('apikey', key);
+    const res = await fetch(url.toString(), {
+      method: 'GET', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', redirect: 'error',
+    });
+    const text = await res.text();
+    if (text.length > 200000) throw new Error('응답이 너무 커요.');
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('응답 형식 오류'); }
+    const code = Number(j && j.code) || res.status;
+    if (code === 401 || code === 403) throw Object.assign(new Error('Twelve Data 키가 올바르지 않거나 권한이 없어요.'), { fatal: true });
+    if (code === 429) throw Object.assign(new Error('한도 초과'), { retry: true });
+    if (!j || j.status !== 'ok' || !Array.isArray(j.values)) throw Object.assign(new Error('지원하지 않는 종목'), { unsupported: true });
+    return j.values.slice(0, 60);
+  }
+
+  function parseDaily(values) {
+    const bars = [];
+    for (const v of values) {
+      const c = Number(v && v.close);
+      if (v && typeof v.datetime === 'string' && DATE_RE.test(v.datetime) && Number.isFinite(c) && c > 0) bars.push([v.datetime, c]);
+    }
+    return bars.sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  }
+  function parseIntraday(values) {
+    const bars = [];
+    for (const v of values) {
+      const m = v && typeof v.datetime === 'string' ? DATETIME_RE.exec(v.datetime) : null;
+      const c = Number(v && v.close);
+      if (!m || !Number.isFinite(c) || c <= 0) continue;
+      const mins = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) / 60000;
+      bars.push([mins, c, `${m[2]}/${m[3]} ${m[4]}:${m[5]}`]);
+    }
+    return bars.sort((a, b) => b[0] - a[0]);
+  }
+
+  function tdEnqueue(runId, symbol, kind, key) {
+    const id = kind + ':' + symbol;
+    if (td.queue.some((j) => j.id === id)) return;
+    td.queue.push({ id, runId, symbol, kind, key, tries: 0 });
+    tdPump();
+  }
+  async function tdPump() {
+    if (td.busy) return;
+    td.busy = true;
+    while (td.queue.length) {
+      const job = td.queue[0];
+      if (job.runId !== state.runId) { td.queue.shift(); continue; }
+      const wait = TD_SPACING - (Date.now() - td.last);
+      if (wait > 0) await sleep(wait);
+      if (job.runId !== state.runId) { td.queue.shift(); continue; }
+      td.last = Date.now();
+      try {
+        if (job.kind === 'daily') {
+          const bars = parseDaily(await fetchSeries(job.symbol, '1day', 30, job.key));
+          if (bars.length) { state.daily.set(job.symbol, { fetchedAt: Date.now(), bars }); saveHistCache(); }
+        } else {
+          const bars = parseIntraday(await fetchSeries(job.symbol, '5min', 24, job.key));
+          if (bars.length) state.intraday.set(job.symbol, { fetchedAt: Date.now(), bars });
+        }
+        td.queue.shift();
+      } catch (e) {
+        if (e.fatal) {
+          td.queue.length = 0;
+          showBanner(e.message + ' 설정에서 Twelve Data 키를 확인해 주세요.', true);
+          break;
+        }
+        if (e.retry && job.tries < 1) { job.tries++; td.last = Date.now() + 52000; continue; } // 1분 쉬고 한 번만 재시도
+        if (e.unsupported) state.histUnsupported.add(job.symbol);
+        td.queue.shift();
+      }
+      updateHistBanner();
+      scheduleRender(false);
+    }
+    td.busy = false;
+    updateHistBanner();
+  }
+  function updateHistBanner() {
+    if (state.mode !== 'live' || state.settings.period === 'day') return;
+    const n = td.queue.length;
+    if (n > 0) showBanner(`${PERIODS[state.settings.period]} 기준 데이터를 불러오는 중이에요 (남은 종목 ${n}개 · 무료 한도 때문에 종목당 약 8초).`);
+    else if (!ui.banner.classList.contains('error')) showBanner('');
+  }
+
+  // 지금 선택된 기간에 필요한 과거 데이터를 요청한다.
+  function requestHistory(runId) {
+    if (state.mode !== 'live') return;
+    const key = getTdKey();
+    const period = state.settings.period;
+    clearInterval(td.intradayTimer);
+    if (period === 'day') { updateHistBanner(); return; }
+    if (!key) {
+      showBanner(`${PERIODS[period]} 등락률을 보려면 설정에서 Twelve Data API 키를 넣어 주세요. (오늘 등락은 키 없이도 돼요)`);
+      return;
+    }
+    const usd = state.holdings.filter((h) => h.currency === 'USD' && !state.histUnsupported.has(h.symbol));
+    if (period === '1w' || period === '1m') {
+      for (const h of usd) {
+        const d = state.daily.get(h.symbol);
+        if (!d || Date.now() - d.fetchedAt > DAILY_MAX_AGE) tdEnqueue(runId, h.symbol, 'daily', key);
+      }
+    } else if (period === '1h') {
+      // 하루 800건 한도: 종목이 많을수록 새로고침 간격을 늘린다 (최소 10분)
+      const everyMin = Math.max(10, Math.ceil(usd.length * 0.7));
+      const refresh = (force) => {
+        for (const h of usd) {
+          const d = state.intraday.get(h.symbol);
+          if (force || !d || Date.now() - d.fetchedAt > everyMin * 60000) tdEnqueue(runId, h.symbol, 'intraday', key);
+        }
+      };
+      refresh(false);
+      td.intradayTimer = setInterval(() => {
+        if (runId === state.runId && marketSession().text === '정규장') refresh(false);
+      }, 60000);
+    }
+    updateHistBanner();
+  }
+
+  function setPeriod(period) {
+    if (!Object.prototype.hasOwnProperty.call(PERIODS, period) || period === state.settings.period) return;
+    state.settings.period = period;
+    saveState();
+    showBanner('');
+    if (state.mode === 'demo') showBanner(DEMO_BANNER);
+    requestHistory(state.runId);
+    renderNow();
+  }
+
+  // ---------------------------------------------------------------------------
   // 데모 (가상 데이터 — 실제 시세가 아님)
   // ---------------------------------------------------------------------------
   const DEMO = {
@@ -483,14 +692,21 @@
     ],
     base: { VOO: 500, QQQ: 470, VTI: 270, SCHD: 27, JEPI: 56, SOXX: 225, SMH: 255, TLT: 88 },
   };
+  const DEMO_BANNER = '데모 화면이에요 (가상 데이터). 종목 관리에서 내 종목을 추가하면 내 포트폴리오로 바뀌어요.';
   function startDemo(runId) {
     state.quotes.clear();
+    const spread = { '1h': 0.012, day: 0.05, '1w': 0.1, '1m': 0.2 };
+    state.demoBases = {};
+    for (const p of Object.keys(PERIODS)) state.demoBases[p] = {};
     for (const [s, pc] of Object.entries(DEMO.base)) {
       const start = pc * (1 + (Math.random() - 0.45) * 0.05);
       state.quotes.set(s, { supported: true, price: start, prevClose: pc, lastTrade: null });
+      for (const p of Object.keys(PERIODS)) {
+        state.demoBases[p][s] = p === 'day' ? pc : start * (1 + (Math.random() - 0.5) * spread[p]);
+      }
     }
     setConn('데모', 'warn');
-    showBanner('데모 화면이에요 (가상 데이터). 설정에서 API 키를 넣고 종목 관리에서 종목을 추가하면 내 포트폴리오가 실시간으로 표시돼요.');
+    showBanner(DEMO_BANNER);
     const t = setInterval(() => {
       if (runId !== state.runId) return;
       const syms = Object.keys(DEMO.base);
@@ -517,6 +733,7 @@
     state.timers = [];
     state.quotes.clear();
     state.lastPrice.clear();
+    clearInterval(td.intradayTimer);
     showBanner('');
     state.mode = state.settings.demo || state.holdings.length === 0 ? 'demo' : 'live';
     if (state.mode === 'demo') { startDemo(runId); return; }
@@ -525,11 +742,14 @@
     scheduleRender(true);
     if (!key) {
       setConn('API 키 없음', 'bad');
-      showBanner('설정에서 Finnhub API 키를 넣으면 실시간 시세가 표시돼요. 지금은 직접 입력한 가격이나 평단 기준으로 보여요.');
+      showBanner('설정에서 Finnhub API 키를 넣으면 내 종목의 등락이 표시돼요. 지금은 직접 입력한 가격이나 평단 기준으로 보여요.');
       return;
     }
     if (!storageOk) showBanner('이 브라우저는 저장소를 쓸 수 없어 새로고침하면 데이터가 사라져요.', true);
     setConn('시세 불러오는 중…', 'warn');
+    td.queue.length = 0;
+    state.histUnsupported.clear();
+    requestHistory(runId);
     loadQuotes(runId, key).then(() => connectWS(runId, key));
     state.timers.push(setInterval(() => { if (runId === state.runId) loadQuotes(runId, key); }, QUOTE_REFRESH));
   }
@@ -622,7 +842,26 @@
   function renderKeyStatus() {
     const k = getApiKey();
     ui.keyStatus.textContent = k ? `저장됨 (••••${k.slice(-4)})` : '저장된 키 없음';
+    const t = getTdKey();
+    $('tdKeyStatus').textContent = t ? `저장됨 (••••${t.slice(-4)})` : '저장된 키 없음';
   }
+  $('tdKeyForm').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const input = $('fTdKey');
+    const k = input.value.trim();
+    input.value = '';
+    if (!API_KEY_RE.test(k)) { ui.settingsMsg.textContent = 'Twelve Data 키 형식이 올바르지 않아요 (영문·숫자만).'; return; }
+    storeSet(TD_KEY_KEY, k);
+    renderKeyStatus();
+    ui.settingsMsg.textContent = 'Twelve Data 키를 저장했어요.';
+    restart();
+  });
+  $('deleteTdKeyBtn').addEventListener('click', () => {
+    storeRemove(TD_KEY_KEY);
+    renderKeyStatus();
+    ui.settingsMsg.textContent = 'Twelve Data 키를 삭제했어요.';
+    restart();
+  });
   function openSettings() {
     $('fFx').value = String(state.settings.fxRate);
     $('fRange').value = String(state.settings.range);
@@ -679,9 +918,13 @@
     new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => scheduleRender(true), 150); }).observe(ui.map);
   }
   setInterval(updateMarketBadge, 30000);
+  document.querySelectorAll('.period-btn').forEach((b) => {
+    b.addEventListener('click', () => setPeriod(b.dataset.period));
+  });
 
   // 시작
   loadState();
+  loadHistCache();
   updateMarketBadge();
   restart();
 })();

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- 보안: 이 페이지가 불러올 수 있는 것을 화이트리스트로 제한합니다 (SECURITY.md 참고) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://finnhub.io wss://ws.finnhub.io; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://finnhub.io wss://ws.finnhub.io https://api.twelvedata.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#0f1115">
   <title>스톡맵 · 내 포트폴리오</title>
@@ -24,8 +24,14 @@
       <button id="maskBtn" class="icon-btn" type="button" aria-label="금액 가리기/보이기">👁</button>
     </div>
     <div class="stat">
-      <span class="label">오늘</span>
+      <span id="periodLabel" class="label">오늘</span>
       <span id="today" class="value">-</span>
+    </div>
+    <div class="periods" role="group" aria-label="등락 기간">
+      <button type="button" class="period-btn" data-period="1h">1시간</button>
+      <button type="button" class="period-btn" data-period="day">오늘</button>
+      <button type="button" class="period-btn" data-period="1w">1주</button>
+      <button type="button" class="period-btn" data-period="1m">1달</button>
     </div>
     <div class="spacer"></div>
     <span id="market" class="badge">-</span>
@@ -82,6 +88,16 @@
         <input id="fKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
         <button class="btn primary" type="submit">저장</button>
         <button id="deleteKeyBtn" class="btn danger" type="button">삭제</button>
+      </form>
+    </section>
+    <section class="setting">
+      <h3>Twelve Data API 키 (1시간·1주·1달 등락용)</h3>
+      <p class="muted small">기간별 등락률에 필요한 과거 가격을 가져와요. 무료 한도(분당 8건)를 지키려고 종목당 약 8초 간격으로 천천히 불러와요. 이 키도 이 브라우저에만 저장돼요.</p>
+      <p id="tdKeyStatus" class="small"></p>
+      <form id="tdKeyForm" class="row" autocomplete="off" novalidate>
+        <input id="fTdKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
+        <button class="btn primary" type="submit">저장</button>
+        <button id="deleteTdKeyBtn" class="btn danger" type="button">삭제</button>
       </form>
     </section>
     <section class="setting">
