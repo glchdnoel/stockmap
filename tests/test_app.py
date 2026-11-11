@@ -281,6 +281,13 @@ with sync_playwright() as p:
     page = ctx.new_page()
     page.on("dialog", lambda d: d.accept())
     stored = lambda: json.loads(page.evaluate("() => localStorage.getItem('stockmap.v1') || '{}'"))
+    # 실패 시 화면과 저장소 상태를 보여 주는 상세 값 (키 값은 찍지 않음)
+    snapshot_state = lambda: json.dumps(page.evaluate("""() => ({
+        mode: document.getElementById('conn').textContent,
+        leaves: [...document.querySelectorAll('.leaf')].map(e => e.dataset.symbol),
+        localStorage: Object.fromEntries(Object.keys(localStorage).map(k => [k, /key$/.test(k) ? '(키 생략)' : localStorage.getItem(k)])),
+        sessionStorage: Object.fromEntries(Object.keys(sessionStorage).map(k => [k, /key$/.test(k) ? '(키 생략)' : sessionStorage.getItem(k)])),
+    })"""), ensure_ascii=False)
     page.goto(BASE); page.wait_for_timeout(800)
     page.click("#manageBtn")
     page.fill("#fSymbol", "VOO"); page.fill("#fShares", "2"); page.fill("#fAvg", "400")
@@ -293,12 +300,18 @@ with sync_playwright() as p:
     check("켜면 보유 종목 저장", [h["symbol"] for h in stored().get("holdings", [])] == ["VOO"], str(stored()))
     page.uncheck("#fRememberHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
     check("끄면 저장된 보유 종목 삭제", "holdings" not in stored(), str(stored()))
-    check("끈 뒤에도 이번 탭에서는 표시", page.locator(".leaf[data-symbol=VOO]").count() == 1)
-    page.evaluate("() => localStorage.setItem('stockmap.v1', JSON.stringify({holdings: [{symbol: 'QQQ', currency: 'USD', shares: 1, avgPrice: 1}]}))")
+    check("끈 뒤에도 이번 탭에서는 표시(데모 아님)", page.locator(".leaf[data-symbol=VOO]").count() == 1 and page.text_content("#conn") != "데모", snapshot_state())
+    # 데모 화면에도 QQQ가 있어서, 데모에 없는 티커(NOTDEMO)로 확인해요.
+    page.evaluate("() => localStorage.setItem('stockmap.v1', JSON.stringify({holdings: [{symbol: 'NOTDEMO', currency: 'USD', shares: 1, avgPrice: 1}]}))")
     page.reload(); page.wait_for_timeout(800)
-    check("예전 저장값은 불러온 뒤 저장소에서 지움", "holdings" not in stored() and page.locator(".leaf[data-symbol=QQQ]").count() == 1, str(stored()))
+    check("예전 저장값은 불러온 뒤 저장소에서 지움",
+          "holdings" not in stored() and page.locator(".leaf[data-symbol=NOTDEMO]").count() == 1, snapshot_state())
     page.reload(); page.wait_for_timeout(800)
-    check("기억하기 꺼지면 새로고침 뒤 보유 종목 없음", page.locator(".leaf[data-symbol=QQQ]").count() == 0)
+    st = json.loads(snapshot_state())
+    check("기억하기 꺼지면 새로고침 뒤 보유 종목 없음(화면·localStorage·sessionStorage)",
+          "NOTDEMO" not in st["leaves"] and st["mode"] == "데모"
+          and "NOTDEMO" not in json.dumps(st["localStorage"]) and "NOTDEMO" not in json.dumps(st["sessionStorage"]),
+          json.dumps(st, ensure_ascii=False))
     page.evaluate("() => localStorage.setItem('stockmap.hist.v1', JSON.stringify({VOO: {fetchedAt: Date.now(), bars: [['2026-01-02', 100]], full: true}}))")
     page.reload(); page.wait_for_timeout(800)
     check("기억하기 꺼져 있으면 저장된 과거 가격 캐시 삭제", page.evaluate("() => localStorage.getItem('stockmap.hist.v1')") is None)
