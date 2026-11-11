@@ -167,8 +167,11 @@
   function getTdKey() { return readKey(TD_KEY_KEY); }
   // 일봉 캐시 (가격 숫자만 저장, 형식 검사 후 사용)
   function loadHistCache() {
+    const raw = storeGet(HIST_KEY);
+    // 보유 종목 기억하기가 꺼져 있으면 이번 탭에서만 쓰고, 저장돼 있던 캐시는 지운다 (종목 목록이 남지 않게).
+    if (raw !== null && !state.settings.rememberHoldings) storeRemove(HIST_KEY);
     try {
-      const data = JSON.parse(storeGet(HIST_KEY) || '{}');
+      const data = JSON.parse(raw || '{}');
       if (!data || typeof data !== 'object') return;
       for (const [sym, v] of Object.entries(data).slice(0, MAX_HOLDINGS)) {
         if (!SYMBOL_RE.test(sym) || !v || !Array.isArray(v.bars) || !Number.isFinite(v.fetchedAt)) continue;
@@ -178,6 +181,7 @@
     } catch (e) { /* 캐시가 깨졌으면 무시 */ }
   }
   function saveHistCache() {
+    if (!state.settings.rememberHoldings) { storeRemove(HIST_KEY); return; } // 꺼져 있으면 메모리에만
     const keep = new Set(state.holdings.map((h) => h.symbol));
     const out = {};
     for (const [sym, v] of state.daily) if (keep.has(sym)) out[sym] = v;
@@ -871,9 +875,9 @@
   // ---------------------------------------------------------------------------
   function renderKeyStatus() {
     const k = getApiKey();
-    ui.keyStatus.textContent = k ? `저장됨 (••••${k.slice(-4)})` : '저장된 키 없음';
+    ui.keyStatus.textContent = k ? '저장됨' : '저장된 키 없음';
     const t = getTdKey();
-    $('tdKeyStatus').textContent = t ? `저장됨 (••••${t.slice(-4)})` : '저장된 키 없음';
+    $('tdKeyStatus').textContent = t ? '저장됨' : '저장된 키 없음';
   }
   $('tdKeyForm').addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -941,6 +945,7 @@
       }
       state.settings.rememberHoldings = $('fRememberHoldings').checked;
       saveState(); // 끄면 저장돼 있던 보유 종목이 여기서 지워져요
+      saveHistCache(); // 과거 가격 캐시도 같은 스위치를 따라요
       ui.settingsMsg.textContent = '적용했어요.';
       restart();
     } catch (e) {
