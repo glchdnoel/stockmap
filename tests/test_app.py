@@ -77,6 +77,8 @@ with sync_playwright() as p:
     page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
     sent_hosts = []
     page.on("request", lambda r: sent_hosts.append(r.url.split('/')[2]))
+    outbound = []  # 시세 업체로 나가는 REST 요청 (주소, 본문)
+    page.on("request", lambda r: outbound.append((r.url, r.post_data)) if r.url.startswith(("https://finnhub.io", "https://api.twelvedata.com")) else None)
     prices = {"VOO": (500, 495), "QQQ": (470, 480), "SCHD": (27, 27.1), "SOXX": (230, 220)}
     def quote(route):
         from urllib.parse import urlparse, parse_qs
@@ -86,9 +88,11 @@ with sync_playwright() as p:
         route.fulfill(status=200, headers={"Access-Control-Allow-Origin": "*", "Content-Type": "application/json"},
                       body=json.dumps({"c": c, "pc": pc, "d": c - pc, "dp": 0}))
     page.route("https://finnhub.io/api/v1/quote*", quote)
-    ws_state = {"subs": []}
+    ws_state = {"subs": [], "urls": [], "msgs": []}
     def on_ws(ws):
+        ws_state["urls"].append(ws.url)
         def on_msg(m):
+            ws_state["msgs"].append(m)
             ws_state["subs"].append(json.loads(m)["symbol"])
             if len(ws_state["subs"]) == 3:
                 ws.send(json.dumps({"type": "trade", "data": [
@@ -104,7 +108,7 @@ with sync_playwright() as p:
         {"symbol": "SOXX", "currency": "USD", "shares": 5, "avgPrice": 210, "group": "반도체"},
         {"symbol": "000660", "currency": "KRW", "shares": 3, "avgPrice": 180000, "group": "한국", "manualPrice": 205000},
     ]
-    page.evaluate("h => { localStorage.setItem('stockmap.v1', JSON.stringify({holdings: h})); localStorage.setItem('stockmap.apikey', 'abcdEFGH1234test'); }", holdings)
+    page.evaluate("h => { localStorage.setItem('stockmap.v1', JSON.stringify({settings: {rememberHoldings: true}, holdings: h})); localStorage.setItem('stockmap.apikey', 'abcdEFGH1234test'); }", holdings)
     page.reload(); page.wait_for_timeout(4000)
     check("웹소켓 구독(USD 3종목)", sorted(ws_state["subs"]) == ["QQQ", "SOXX", "VOO"], str(ws_state["subs"]))
     check("실시간 상태 표시", page.text_content("#conn") == "실시간", page.text_content("#conn"))
@@ -180,6 +184,33 @@ with sync_playwright() as p:
     check("통신 대상이 허용 목록뿐(기간)", set(sent_hosts) <= {"localhost:8765", "finnhub.io", "ws.finnhub.io", "api.twelvedata.com"}, str(set(sent_hosts)))
     check("CSP 위반 없음(기간)", not any("Content Security Policy" in c for c in console), str(console))
     check("alert 실행 안 됨(기간)", not dialogs, str(dialogs))
+
+    # 나가는 요청 점검: 종목 코드와 키 외에 수량·평단·평가액이 실리지 않는지
+    from urllib.parse import urlparse, parse_qs
+    usd_syms = {"VOO", "QQQ", "SOXX"}
+    allowed_params = {
+        "finnhub.io": {"symbol": usd_syms, "token": None},
+        "api.twelvedata.com": {"symbol": usd_syms, "interval": {"1day", "5min"}, "outputsize": {"800", "24"},
+                               "timezone": {"America/New_York"}, "apikey": None},
+    }
+    leaks = []
+    for url, body in outbound:
+        u = urlparse(url)
+        rule = allowed_params.get(u.hostname, {})
+        if body:
+            leaks.append(("본문", url))
+        for k, vs in parse_qs(u.query).items():
+            if k not in rule or (rule[k] is not None and not set(vs) <= rule[k]):
+                leaks.append(("항목", k, vs))
+    for url in ws_state["urls"]:
+        if set(parse_qs(urlparse(url).query)) != {"token"}:
+            leaks.append(("웹소켓 주소", url))
+    for m in ws_state["msgs"]:
+        msg = json.loads(m)
+        if set(msg) != {"type", "symbol"} or msg["symbol"] not in usd_syms:
+            leaks.append(("웹소켓 메시지", m))
+    check("나가는 요청을 실제로 잡음", len(outbound) > 0 and len(ws_state["msgs"]) > 0, f"REST {len(outbound)}, WS {len(ws_state['msgs'])}")
+    check("시세 요청에 종목 코드·키·조회 옵션만 들어감(수량·평단·평가액 없음)", not leaks, str(leaks))
     page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(500)
     page.mouse.move(5, 5); page.wait_for_timeout(300)
     page.screenshot(path="./week.png")
@@ -193,6 +224,31 @@ with sync_playwright() as p:
     st = page.evaluate("() => [localStorage.length, sessionStorage.length]")
     check("모든 데이터 지우기", st == [0, 0], str(st))
     check("금액 숨기기 버튼 글자", page.text_content("#maskBtn") == "금액 숨기기", page.text_content("#maskBtn"))
+    ctx.close()
+
+    # 8) 보유 종목 기억하기 스위치 (기본 꺼짐)
+    ctx = b.new_context(viewport={"width": 1280, "height": 720})
+    page = ctx.new_page()
+    page.on("dialog", lambda d: d.accept())
+    stored = lambda: json.loads(page.evaluate("() => localStorage.getItem('stockmap.v1') || '{}'"))
+    page.goto(BASE); page.wait_for_timeout(800)
+    page.click("#manageBtn")
+    page.fill("#fSymbol", "VOO"); page.fill("#fShares", "2"); page.fill("#fAvg", "400")
+    page.click("#addForm button[type=submit]"); page.wait_for_timeout(300)
+    page.click("[data-close=manageDlg]")
+    check("기본값: 보유 종목을 저장하지 않음", "holdings" not in stored(), str(stored()))
+    page.click("#settingsBtn")
+    check("기억하기 기본 꺼짐", not page.is_checked("#fRememberHoldings"))
+    page.check("#fRememberHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    check("켜면 보유 종목 저장", [h["symbol"] for h in stored().get("holdings", [])] == ["VOO"], str(stored()))
+    page.uncheck("#fRememberHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    check("끄면 저장된 보유 종목 삭제", "holdings" not in stored(), str(stored()))
+    check("끈 뒤에도 이번 탭에서는 표시", page.locator(".leaf[data-symbol=VOO]").count() == 1)
+    page.evaluate("() => localStorage.setItem('stockmap.v1', JSON.stringify({holdings: [{symbol: 'QQQ', currency: 'USD', shares: 1, avgPrice: 1}]}))")
+    page.reload(); page.wait_for_timeout(800)
+    check("예전 저장값은 불러온 뒤 저장소에서 지움", "holdings" not in stored() and page.locator(".leaf[data-symbol=QQQ]").count() == 1, str(stored()))
+    page.reload(); page.wait_for_timeout(800)
+    check("기억하기 꺼지면 새로고침 뒤 보유 종목 없음", page.locator(".leaf[data-symbol=QQQ]").count() == 0)
     b.close()
 
 fails = [r for r in results if not r[1]]
