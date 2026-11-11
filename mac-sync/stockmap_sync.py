@@ -22,6 +22,7 @@ import re
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -231,17 +232,44 @@ def build_holdings(items, groups):
     return out, skipped
 
 
+def check_safe_dir(directory):
+    """저장할 폴더가 내 것이고, 다른 사용자가 쓸 수 없는지 확인해요."""
+    st = os.stat(directory)
+    if st.st_uid != os.getuid():
+        raise SyncError(f"저장 폴더의 주인이 내가 아니라서 중단했어요: {directory}")
+    if st.st_mode & 0o022:
+        raise SyncError(f"다른 사용자도 쓸 수 있는 폴더라서 중단했어요: {directory}")
+
+
+def write_file_safely(path, text):
+    """링크 공격에 안전하게 저장해요.
+    같은 폴더에 임시 파일(권한 600, 새로 만들기만 허용)을 쓰고 디스크에 확정(fsync)한 뒤,
+    os.replace로 이름을 바꿔요. 결과 경로가 링크여도 링크만 교체되고 링크가 가리키던 파일은 그대로예요."""
+    path = Path(path).expanduser()
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    check_safe_dir(directory)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    return path
+
+
 def write_output(holdings, out_path):
     payload = json.dumps({"version": 1, "source": "tossinvest", "holdings": holdings},
                          ensure_ascii=False, indent=2)
-    out_path = Path(out_path).expanduser()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    # 나만 읽을 수 있는 권한(600)으로 저장
-    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(payload)
-    os.chmod(out_path, 0o600)
-    return out_path
+    # 나만 읽을 수 있는 권한(600)으로 저장 (mkstemp가 600으로 만들어요)
+    return write_file_safely(out_path, payload)
 
 
 # ---------------------------------------------------------------------------
