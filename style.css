@@ -28,6 +28,8 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .period-btn:hover { color: var(--text); }
 .period-btn.active { background: var(--accent); color: #fff; }
 .muted { color: var(--muted); }
+.fx-info { font-size: 11px; font-variant-numeric: tabular-nums; }
+.fx-info.fx-manual { color: #e5a648; }
 .small { font-size: 12px; }
 .badge { padding: 3px 8px; border-radius: 999px; background: #222733; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .badge.live { background: rgba(47,191,91,.15); color: var(--up); }
@@ -58,14 +60,18 @@ body { display: flex; flex-direction: column; overflow: hidden; }
   align-items: center; justify-content: center; text-align: center; color: #fff; cursor: default;
   transition: background-color .6s ease; text-shadow: 0 1px 2px rgba(0,0,0,.35); }
 .leaf:hover { outline: 2px solid rgba(255,255,255,.6); outline-offset: -2px; }
-.leaf .sym { font-weight: 700; line-height: 1.15; }
-.leaf .pct { opacity: .95; font-variant-numeric: tabular-nums; }
+.leaf .sym { font-weight: 700; line-height: 1.15; max-width: 100%; padding: 0 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 이름과 등락이 두 줄로 안 들어가는 낮은 박스는 등락을 숨겨요 (app.js가 data-tight를 붙여요) */
+.leaf[data-tight="1"] .pct { display: none; }
+.leaf .pct:empty, .leaf .sym:empty, .leaf .val:empty { display: none; }
+.leaf .pct { opacity: .95; font-variant-numeric: tabular-nums; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; padding: 0 2px; }
 .leaf .val { opacity: .75; font-size: 11px; margin-top: 2px; }
 .leaf.flash-up { box-shadow: inset 0 0 0 2px rgba(120,255,160,.9); }
 .leaf.flash-down { box-shadow: inset 0 0 0 2px rgba(255,140,140,.9); }
 .leaf.nodata { background: #2b2f37 !important; color: #aab1bd; }
 
-.tooltip { position: fixed; z-index: 10; pointer-events: none; min-width: 180px; max-width: 260px;
+.tooltip { position: fixed; z-index: 10; pointer-events: none; min-width: min(180px, calc(100vw - 12px)); max-width: min(260px, calc(100vw - 12px));
   background: #0b0d11; border: 1px solid #343a46; border-radius: 8px; padding: 8px 10px; font-size: 12px;
   box-shadow: 0 6px 20px rgba(0,0,0,.45); }
 .tooltip .tt-title { font-weight: 700; margin-bottom: 4px; }
@@ -97,7 +103,22 @@ input[type=checkbox] { width: 16px; height: 16px; }
 
 @media (max-width: 640px) {
   .grid-form { grid-template-columns: 1fr 1fr; }
-  .topbar { gap: 8px; }
+  .topbar { gap: 6px 8px; padding: 6px 10px; }
   #updated { display: none; }
-  .periods { order: 10; width: 100%; justify-content: space-between; }
+  /* 핸드폰: 누르는 곳은 최소 44×44px */
+  .btn, .icon-btn, .period-btn { min-height: 44px; min-width: 44px; }
+  .btn { padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; }
+  .icon-btn { display: inline-flex; align-items: center; justify-content: center; }
+  .link-btn { min-height: 44px; padding: 0 6px; }
+  .leaf, .period-btn, .btn, .icon-btn, .link-btn { touch-action: manipulation; }
+  /* 기간 버튼 8개: 한 줄에 들어가면 한 줄, 안 들어가면 그 안에서만 가로로 밀어요 (화면 전체는 안 밀려요) */
+  .periods { order: 10; width: 100%; display: flex; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .periods::-webkit-scrollbar { display: none; }
+  .period-btn { flex: 1 0 44px; padding: 0 4px; font-size: 13px; white-space: nowrap; }
+  .fx-info { order: 11; width: 100%; }
+  .tooltip { font-size: 13px; }
+}
+/* 아주 좁은 화면(380px 미만): 기간 버튼을 4개씩 2줄로 */
+@media (max-width: 379px) {
+  .periods { display: grid; grid-template-columns: repeat(4, 1fr); overflow-x: visible; }
 }
