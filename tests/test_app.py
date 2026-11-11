@@ -1,8 +1,47 @@
-"""스톡맵 자동 점검: CSP 위반, XSS 시도, 입력 검증, 실시간(모의) 동작."""
-import json, sys
+"""스톡맵 자동 점검: CSP 위반, XSS 시도, 입력 검증, 실시간(모의) 동작.
+실행: 저장소 최상위 폴더에서 `python3 tests/test_app.py` (포트 8765에 테스트용 서버를 직접 띄워요)."""
+import http.server, json, re, sys, threading
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-BASE = "http://localhost:8765/index.html"
+ROOT = Path(__file__).resolve().parent.parent
+PORT = 8765
+BASE = f"http://localhost:{PORT}/index.html"
+PROD_SCRIPT_SRC = "https://glchdnoel.github.io/stockmap/"
+CSP_RE = re.compile(r'<meta http-equiv="Content-Security-Policy" content="[^"]*">')
+
+
+def local_index_html():
+    """실제 index.html은 그대로 두고, 보낼 때 CSP의 운영 주소 부분만 로컬 주소로 바꿔요."""
+    html = (ROOT / "index.html").read_text(encoding="utf-8")
+    m = CSP_RE.search(html)
+    if not m or PROD_SCRIPT_SRC not in m.group(0):
+        raise SystemExit("index.html에서 CSP 또는 운영 script-src 주소를 찾지 못했어요.")
+    csp = m.group(0).replace(PROD_SCRIPT_SRC, f"http://localhost:{PORT}/")
+    return html[:m.start()] + csp + html[m.end():]
+
+
+class TestServer(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        if self.path.split("?")[0] in ("/", "/index.html"):
+            body = local_index_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
+
+server = http.server.ThreadingHTTPServer(("localhost", PORT), TestServer)
+threading.Thread(target=server.serve_forever, daemon=True).start()
 results = []
 def check(name, ok, detail=""):
     results.append((name, ok, detail))
@@ -214,10 +253,21 @@ with sync_playwright() as p:
     page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(500)
     page.mouse.move(5, 5); page.wait_for_timeout(300)
     page.screenshot(path="./week.png")
+    check("기억하기 켜면 과거 가격 캐시 저장", page.evaluate("() => localStorage.getItem('stockmap.hist.v1') !== null"))
+    page.click("#settingsBtn"); page.uncheck("#fRememberHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    st = page.evaluate("() => [localStorage.getItem('stockmap.hist.v1'), 'holdings' in JSON.parse(localStorage.getItem('stockmap.v1') || '{}')]")
+    check("기억하기 끄면 과거 가격 캐시도 삭제", st == [None, False], str(st))
+    page.click(".period-btn[data-period='1m']"); page.wait_for_timeout(2000)
+    check("끄고 나서도 이번 탭에서는 캐시 사용(저장 안 함)", page.text_content(".leaf[data-symbol=VOO] .pct").endswith("%")
+          and page.evaluate("() => localStorage.getItem('stockmap.hist.v1')") is None, page.text_content(".leaf[data-symbol=VOO] .pct"))
+    page.click("[data-close=settingsDlg]")
 
     # 7) 보안 설정: 키 기억 끄기, 전체 삭제
     page.on("dialog", lambda d: d.accept())
-    page.click("#settingsBtn"); page.uncheck("#fRemember"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    page.click("#settingsBtn")
+    check("설정 화면에 키 일부도 표시 안 함", page.text_content("#keyStatus") == "저장됨" and page.text_content("#tdKeyStatus") == "저장됨",
+          f"{page.text_content('#keyStatus')} / {page.text_content('#tdKeyStatus')}")
+    page.uncheck("#fRemember"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
     st = page.evaluate("() => [localStorage.getItem('stockmap.apikey'), sessionStorage.getItem('stockmap.apikey'), localStorage.getItem('stockmap.tdkey'), sessionStorage.getItem('stockmap.tdkey')]")
     check("기억 끄면 키가 세션에만", st[0] is None and st[2] is None and st[1] and st[3], str(st))
     page.click("#wipeBtn"); page.wait_for_timeout(500)
@@ -249,8 +299,12 @@ with sync_playwright() as p:
     check("예전 저장값은 불러온 뒤 저장소에서 지움", "holdings" not in stored() and page.locator(".leaf[data-symbol=QQQ]").count() == 1, str(stored()))
     page.reload(); page.wait_for_timeout(800)
     check("기억하기 꺼지면 새로고침 뒤 보유 종목 없음", page.locator(".leaf[data-symbol=QQQ]").count() == 0)
+    page.evaluate("() => localStorage.setItem('stockmap.hist.v1', JSON.stringify({VOO: {fetchedAt: Date.now(), bars: [['2026-01-02', 100]], full: true}}))")
+    page.reload(); page.wait_for_timeout(800)
+    check("기억하기 꺼져 있으면 저장된 과거 가격 캐시 삭제", page.evaluate("() => localStorage.getItem('stockmap.hist.v1')") is None)
     b.close()
 
+server.shutdown()
 fails = [r for r in results if not r[1]]
 print(f"\n{len(results) - len(fails)}/{len(results)} 통과")
 sys.exit(1 if fails else 0)
