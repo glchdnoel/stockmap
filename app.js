@@ -36,6 +36,8 @@
   const TD_KEY_KEY = 'stockmap.tdkey';
   const HIST_KEY = 'stockmap.hist.v1';
   const TD_URL = 'https://api.twelvedata.com/time_series';
+  const TD_FX_URL = 'https://api.twelvedata.com/exchange_rate'; // 환율 (1건 = 무료 한도 1건, 같은 대기열 사용)
+  const FX_PAIR = 'USD/KRW';
   const TD_SPACING = 8000;                 // 8초에 1건 → 분당 7.5건
   const DAILY_MAX_AGE = 6 * 60 * 60 * 1000; // 일봉은 6시간마다 새로
   const PERIODS = { '1h': '1시간', day: '오늘', '1w': '1주', '1m': '1달', '3m': '3달', '6m': '6달', '1y': '1년', '3y': '3년' };
@@ -47,7 +49,7 @@
   const $ = (id) => document.getElementById(id);
   const ui = {
     map: $('map'), total: $('total'), today: $('today'), market: $('market'), conn: $('conn'),
-    updated: $('updated'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
+    updated: $('updated'), fxInfo: $('fxInfo'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
     manageDlg: $('manageDlg'), settingsDlg: $('settingsDlg'), addForm: $('addForm'),
     formMsg: $('formMsg'), holdingsBody: $('holdingsBody'), importFile: $('importFile'),
     keyForm: $('keyForm'), fKey: $('fKey'), keyStatus: $('keyStatus'), settingsMsg: $('settingsMsg'),
@@ -90,13 +92,23 @@
     const avgPrice = toNumber(raw.avgPrice, { min: 0, max: 1e10 });
     const manualPrice = toNumber(raw.manualPrice, { min: 0, max: 1e10, allowEmpty: true });
     const group = cleanText(raw.group, 20) || '기타';
-    const name = cleanText(raw.name, 20) || null; // 선택: 종목명 (숫자 코드 옆에 표시)
+    const name = cleanText(raw.name, 20) || null; // 선택: 종목명 (국내 종목은 코드 대신 이 이름을 표시)
     return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice, name };
   }
   function validateSettings(raw) {
-    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true, rememberHoldings: false };
+    const s = { fxRate: 1400, fxAuto: true, fxLast: null, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true, rememberHoldings: false };
     if (!raw || typeof raw !== 'object') return s;
     try { s.fxRate = toNumber(raw.fxRate, { min: 1, max: 100000 }); } catch (e) { /* 기본값 */ }
+    s.fxAuto = raw.fxAuto !== false; // 기본값: 자동
+    // 마지막으로 자동으로 받은 환율 (자동 받기에 실패했을 때 대신 써요)
+    if (raw.fxLast && typeof raw.fxLast === 'object') {
+      try {
+        s.fxLast = {
+          rate: toNumber(raw.fxLast.rate, { min: 1, max: 100000 }),
+          at: toNumber(raw.fxLast.at, { min: 0, max: Date.now() + 86400000 }),
+        };
+      } catch (e) { s.fxLast = null; }
+    }
     try { s.range = toNumber(raw.range, { min: 0.5, max: 20 }); } catch (e) { /* 기본값 */ }
     s.masked = raw.masked === true;
     s.demo = raw.demo === true;
@@ -122,6 +134,7 @@
     intraday: new Map(),  // symbol -> { fetchedAt, bars: [[분 단위 시각, close, 'MM/DD HH:MM'], ...] (최신순) }
     histUnsupported: new Set(),
     demoBases: {},
+    fx: { status: 'idle', rate: null, at: null, reason: '' }, // 이번에 연 앱에서 자동으로 받은 환율
   };
 
   function loadState() {
@@ -202,6 +215,20 @@
   function fmtKRW(n) { return state.settings.masked ? '••••••' : nfKRW.format(Math.round(n)) + '원'; }
   function fmtSignedKRW(n) { return state.settings.masked ? '••••' : (n >= 0 ? '+' : '') + nfKRW.format(Math.round(n)) + '원'; }
   function fmtPct(p) { return Number.isFinite(p) ? (p >= 0 ? '+' : '') + p.toFixed(2) + '%' : '—'; }
+  // 국내(KRW) 종목은 숫자 코드 대신 종목명, 이름이 없으면 코드. 미국 종목은 티커.
+  function displayName(h) { return h.currency === 'KRW' ? (h.name || h.symbol) : h.symbol; }
+  const nfFx = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2 });
+  const fxTimeFmt = new Intl.DateTimeFormat('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  function fxLabel() {
+    const f = currentFx();
+    const rate = nfFx.format(f.rate) + '원';
+    if (f.source === 'auto') return `환율: 자동 · ${rate} · ${fxTimeFmt.format(f.at)} 기준`;
+    const auto = state.settings.fxAuto;
+    const head = auto && state.fx.status === 'loading' ? '환율: 받는 중' : '환율: 수동';
+    const why = auto && state.fx.status === 'fail' && state.fx.reason ? ` (자동 실패: ${state.fx.reason})` : '';
+    if (f.source === 'last') return `${head} · ${rate} · 지난 자동값 ${fxTimeFmt.format(f.at)} 기준${why}`;
+    return `${head} · ${rate} · 직접 입력${why}`;
+  }
   function fmtPrice(p, cur) {
     if (!Number.isFinite(p)) return '—';
     return cur === 'USD' ? '$' + p.toFixed(2) : nfKRW.format(p) + '원';
@@ -242,7 +269,14 @@
   // 계산
   // ---------------------------------------------------------------------------
   function activeHoldings() { return state.mode === 'demo' ? DEMO.holdings : state.holdings; }
-  function fx(h) { return h.currency === 'USD' ? state.settings.fxRate : 1; }
+  // 지금 쓰는 환율: 자동(이번에 받은 값) → 지난 자동값 → 직접 입력값 순서
+  function currentFx() {
+    const s = state.settings;
+    if (s.fxAuto && state.fx.status === 'ok') return { rate: state.fx.rate, at: state.fx.at, source: 'auto' };
+    if (s.fxAuto && s.fxLast) return { rate: s.fxLast.rate, at: s.fxLast.at, source: 'last' };
+    return { rate: s.fxRate, at: null, source: 'manual' };
+  }
+  function fx(h) { return h.currency === 'USD' ? currentFx().rate : 1; }
 
   // 뉴욕 기준 날짜 문자열 (YYYY-MM-DD)
   const nyDateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -348,10 +382,15 @@
       const w = leaf.x1 - leaf.x0; const h = leaf.y1 - leaf.y0;
       box.dataset.symbol = leaf.data.h.symbol;
       box.dataset.size = w < 44 || h < 26 ? 'xs' : (w < 90 || h < 52 ? 's' : (w * h > 40000 ? 'l' : 'm'));
-      // 좁은 박스에서 글자가 잘리지 않도록 너비에 맞춰 글자 크기를 줄인다
-      const fontBase = Math.max(9, Math.min(28, Math.sqrt(w * h) / 6, w / 4));
+      // 좁은 박스에서 글자가 잘리지 않도록 너비에 맞춰 글자 크기를 줄인다 (한글 종목명은 글자 폭을 1em으로 계산)
+      const label = displayName(leaf.data.h);
+      const ems = [...label].reduce((n, c) => n + (/[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF\u4E00-\u9FFF]/.test(c) ? 1 : 0.62), 0);
+      const fontBase = Math.max(9, Math.min(28, Math.sqrt(w * h) / 6, w / 4, (w * 0.85) / Math.max(ems, 1)));
       const sym = el('div', 'sym'); sym.style.fontSize = fontBase + 'px';
-      const pct = el('div', 'pct'); pct.style.fontSize = Math.max(8, Math.min(fontBase * 0.7, w / 5.5)) + 'px';
+      const pctSize = Math.max(8, Math.min(fontBase * 0.7, w / 5.5));
+      const pct = el('div', 'pct'); pct.style.fontSize = pctSize + 'px';
+      // 이름과 등락이 두 줄로 안 들어가는 낮은 박스는 등락을 숨겨요 (툴팁에서 볼 수 있어요)
+      if (h < fontBase * 1.15 + pctSize * 1.2 + 6) box.dataset.tight = '1';
       const val = el('div', 'val');
       box.append(sym, pct, val);
       attachTooltip(box);
@@ -382,7 +421,7 @@
       const color = colorFor(r.dp);
       ref.box.classList.toggle('nodata', !color);
       ref.box.style.backgroundColor = color || '';
-      ref.sym.textContent = size === 'xs' ? '' : (r.h.name ? `${r.h.symbol} ${r.h.name}` : r.h.symbol);
+      ref.sym.textContent = size === 'xs' ? '' : displayName(r.h);
       ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : leafStatus(r));
       ref.val.textContent = size === 'l' ? fmtKRW(r.value) : '';
       const prev = state.lastPrice.get(r.h.symbol);
@@ -408,6 +447,8 @@
     ui.today.classList.toggle('up', pct > 0);
     ui.today.classList.toggle('down', pct < 0);
     ui.updated.textContent = '업데이트 ' + new Date().toLocaleTimeString('ko-KR');
+    ui.fxInfo.textContent = fxLabel();
+    ui.fxInfo.classList.toggle('fx-manual', currentFx().source !== 'auto');
   }
   function renderNow() {
     state.lastRender = Date.now();
@@ -428,6 +469,23 @@
   // ---------------------------------------------------------------------------
   // 툴팁 (textContent로만 구성)
   // ---------------------------------------------------------------------------
+  // 마우스: 올리면 뜨고 벗어나면 닫혀요. 터치(핸드폰): 박스를 탭하면 뜨고, 다른 곳을 탭하면 닫혀요.
+  let tipBox = null; // 지금 툴팁을 띄운 박스
+  function hideTip() { ui.tooltip.hidden = true; tipBox = null; }
+  // 툴팁이 화면 밖으로 나가지 않게: 기본은 손가락/커서 오른쪽 아래, 넘치면 반대쪽, 그래도 넘치면 화면 안쪽으로 붙여요.
+  function placeTip(cx, cy) {
+    const pad = 14; const edge = 6;
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const vh = document.documentElement.clientHeight || window.innerHeight;
+    const tw = ui.tooltip.offsetWidth; const th = ui.tooltip.offsetHeight;
+    let x = cx + pad; let y = cy + pad;
+    if (x + tw > vw - edge) x = cx - tw - pad;
+    if (y + th > vh - edge) y = cy - th - pad;
+    x = Math.min(Math.max(edge, x), Math.max(edge, vw - tw - edge));
+    y = Math.min(Math.max(edge, y), Math.max(edge, vh - th - edge));
+    ui.tooltip.style.left = x + 'px';
+    ui.tooltip.style.top = y + 'px';
+  }
   function attachTooltip(box) {
     const show = (ev) => {
       const sym = box.dataset.symbol;
@@ -445,7 +503,7 @@
         ['평가손익', Number.isFinite(r.pnl) ? fmtSignedKRW(r.pnl) : '—'],
       ];
       if (!r.live && h.manualPrice) rowsData.push(['수동 가격', '실시간 시세 대신 직접 입력한 가격이라 등락(%)은 표시되지 않아요.']);
-      const nodes = [el('div', 'tt-title', `${h.symbol}${h.name ? ' ' + h.name : ''} · ${h.group}`)];
+      const nodes = [el('div', 'tt-title', `${displayName(h)} · ${h.group}`)];
       for (const [k, v] of rowsData) {
         const row = el('div', 'tt-row');
         row.append(el('span', '', k), el('span', '', v));
@@ -453,22 +511,24 @@
       }
       ui.tooltip.replaceChildren(...nodes);
       ui.tooltip.hidden = false;
-      moveTip(ev);
+      tipBox = box;
+      placeTip(ev.clientX, ev.clientY);
     };
-    const moveTip = (ev) => {
-      const pad = 14;
-      const tw = ui.tooltip.offsetWidth; const th = ui.tooltip.offsetHeight;
-      let x = ev.clientX + pad; let y = ev.clientY + pad;
-      if (x + tw > window.innerWidth) x = ev.clientX - tw - pad;
-      if (y + th > window.innerHeight) y = ev.clientY - th - pad;
-      ui.tooltip.style.left = Math.max(4, x) + 'px';
-      ui.tooltip.style.top = Math.max(4, y) + 'px';
-    };
-    box.addEventListener('pointerenter', show);
-    box.addEventListener('pointermove', moveTip);
-    box.addEventListener('pointerleave', () => { ui.tooltip.hidden = true; });
-    box.addEventListener('click', show);
+    const isMouse = (ev) => ev.pointerType === 'mouse';
+    box.addEventListener('pointerenter', (ev) => { if (isMouse(ev)) show(ev); });
+    box.addEventListener('pointermove', (ev) => { if (isMouse(ev) && tipBox === box) placeTip(ev.clientX, ev.clientY); });
+    box.addEventListener('pointerleave', (ev) => { if (isMouse(ev)) hideTip(); });
+    box.addEventListener('click', show); // 탭(터치)·클릭·키보드
   }
+  // 박스가 아닌 곳을 누르면 닫아요 (핸드폰에서 탭으로 연 툴팁 닫기).
+  document.addEventListener('pointerdown', (ev) => {
+    if (ui.tooltip.hidden) return;
+    const t = ev.target;
+    if (t && t.closest && t.closest('.leaf')) return; // 다른 박스를 탭하면 click에서 그 박스로 바뀌어요
+    hideTip();
+  }, true);
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') hideTip(); });
+  window.addEventListener('resize', hideTip);
 
   // ---------------------------------------------------------------------------
   // 실시간 시세 (Finnhub)
@@ -597,6 +657,49 @@
     return j.values.slice(0, DAILY_BARS);
   }
 
+  // USD/KRW 환율: 보내는 것은 통화쌍과 키뿐이에요.
+  async function fetchFxRate(key) {
+    const url = new URL(TD_FX_URL);
+    url.searchParams.set('symbol', FX_PAIR);
+    url.searchParams.set('apikey', key);
+    const res = await fetch(url.toString(), {
+      method: 'GET', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', redirect: 'error',
+    });
+    const text = await res.text();
+    if (text.length > 10000) throw new Error('응답이 너무 커요.');
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error('응답 형식 오류'); }
+    const code = Number(j && j.code) || res.status;
+    if (code === 401 || code === 403) throw Object.assign(new Error('Twelve Data 키가 올바르지 않거나 권한이 없어요.'), { fatal: true });
+    if (code === 429) throw Object.assign(new Error('한도 초과'), { retry: true });
+    const rate = Number(j && j.rate);
+    if (!j || j.symbol !== FX_PAIR || !Number.isFinite(rate) || rate < 1 || rate > 100000) throw new Error('환율 응답 오류');
+    const ts = Number(j.timestamp) * 1000; // 기준 시각 (초 → 밀리초). 이상하면 받은 시각을 써요.
+    const now = Date.now();
+    const at = Number.isFinite(ts) && ts > now - 30 * 86400000 && ts < now + 86400000 ? ts : now;
+    return { rate, at };
+  }
+  function fxFail(reason) {
+    if (state.fx.status === 'ok') return;
+    state.fx = { status: 'fail', rate: null, at: null, reason };
+    scheduleRender(true);
+  }
+  // 앱을 열 때 한 번. 과거 가격과 같은 대기열(8초에 1건)을 쓰고, 맨 앞에 넣어요.
+  function requestFx() {
+    if (!state.settings.fxAuto || state.fx.status === 'ok' || state.fx.status === 'loading') return;
+    const key = getTdKey();
+    if (!key) { fxFail('Twelve Data 키 없음'); return; }
+    state.fx = { status: 'loading', rate: null, at: null, reason: '' };
+    if (!td.queue.some((j) => j.kind === 'fx')) td.queue.unshift({ id: 'fx', runId: null, symbol: FX_PAIR, kind: 'fx', key, tries: 0 });
+    scheduleRender(false);
+    tdPump();
+  }
+  // 실패한 뒤 키를 넣거나 자동을 다시 켰을 때만 다시 받아요 (이미 받았으면 요청 없음).
+  function retryFx() {
+    if (state.fx.status === 'fail') state.fx.status = 'idle';
+    requestFx();
+  }
+
   function parseDaily(values) {
     const bars = [];
     for (const v of values) {
@@ -623,34 +726,50 @@
     td.queue.push({ id, runId, symbol, kind, key, tries: 0 });
     tdPump();
   }
+  // 환율 작업(runId: null)은 재시작과 상관없이 남겨요.
+  const jobStale = (job) => job.runId !== null && job.runId !== state.runId;
+  function tdDone(job) {
+    const i = td.queue.indexOf(job);
+    if (i >= 0) td.queue.splice(i, 1);
+  }
   async function tdPump() {
     if (td.busy) return;
     td.busy = true;
     while (td.queue.length) {
       const job = td.queue[0];
-      if (job.runId !== state.runId) { td.queue.shift(); continue; }
+      if (jobStale(job)) { tdDone(job); continue; }
       const wait = TD_SPACING - (Date.now() - td.last);
       if (wait > 0) await sleep(wait);
-      if (job.runId !== state.runId) { td.queue.shift(); continue; }
+      if (jobStale(job) || !td.queue.includes(job)) { tdDone(job); continue; }
       td.last = Date.now();
       try {
-        if (job.kind === 'daily') {
+        if (job.kind === 'fx') {
+          const fxKey = getTdKey(); // 기다리는 동안 키가 지워졌으면 보내지 않아요
+          if (!fxKey) { fxFail('Twelve Data 키 없음'); tdDone(job); continue; }
+          const r = await fetchFxRate(fxKey);
+          state.fx = { status: 'ok', rate: r.rate, at: r.at, reason: '' };
+          state.settings.fxLast = { rate: r.rate, at: r.at };
+          saveState();
+          scheduleRender(true);
+        } else if (job.kind === 'daily') {
           const bars = parseDaily(await fetchSeries(job.symbol, '1day', DAILY_BARS, job.key));
           if (bars.length) { state.daily.set(job.symbol, { fetchedAt: Date.now(), bars, full: true }); saveHistCache(); }
         } else {
           const bars = parseIntraday(await fetchSeries(job.symbol, '5min', 24, job.key));
           if (bars.length) state.intraday.set(job.symbol, { fetchedAt: Date.now(), bars });
         }
-        td.queue.shift();
+        tdDone(job);
       } catch (e) {
         if (e.fatal) {
+          if (td.queue.some((j) => j.kind === 'fx')) fxFail('키 오류');
           td.queue.length = 0;
           showBanner(e.message + ' 설정에서 Twelve Data 키를 확인해 주세요.', true);
           break;
         }
         if (e.retry && job.tries < 1) { job.tries++; td.last = Date.now() + 52000; continue; } // 1분 쉬고 한 번만 재시도
-        if (e.unsupported) state.histUnsupported.add(job.symbol);
-        td.queue.shift();
+        if (job.kind === 'fx') fxFail('받기 실패');
+        else if (e.unsupported) state.histUnsupported.add(job.symbol);
+        tdDone(job);
       }
       updateHistBanner();
       scheduleRender(false);
@@ -781,7 +900,7 @@
     }
     if (!storageOk) showBanner('이 브라우저는 저장소를 쓸 수 없어 새로고침하면 데이터가 사라져요.', true);
     setConn('시세 불러오는 중…', 'warn');
-    td.queue.length = 0;
+    td.queue = td.queue.filter((j) => j.kind === 'fx'); // 받는 중인 환율은 남겨요
     state.histUnsupported.clear();
     requestHistory(runId);
     loadQuotes(runId, key).then(() => connectWS(runId, key));
@@ -795,7 +914,7 @@
     const rows = state.holdings.map((h, i) => {
       const tr = document.createElement('tr');
       tr.append(
-        el('td', '', h.symbol), el('td', '', h.currency), el('td', '', nfNum.format(h.shares)),
+        el('td', '', h.symbol), el('td', '', h.name || ''), el('td', '', h.currency), el('td', '', nfNum.format(h.shares)),
         el('td', '', fmtPrice(h.avgPrice, h.currency)), el('td', '', h.group),
       );
       const td = el('td');
@@ -811,7 +930,7 @@
     });
     if (!rows.length) {
       const tr = document.createElement('tr');
-      const td = el('td', 'muted', '아직 종목이 없어요.'); td.colSpan = 6;
+      const td = el('td', 'muted', '아직 종목이 없어요.'); td.colSpan = 7;
       tr.appendChild(td); rows.push(tr);
     }
     ui.holdingsBody.replaceChildren(...rows);
@@ -823,13 +942,14 @@
       const h = validateHolding({
         symbol: $('fSymbol').value, currency: $('fCurrency').value, shares: $('fShares').value,
         avgPrice: $('fAvg').value, group: $('fGroup').value, manualPrice: $('fManual').value,
+        name: $('fName').value,
       });
       if (state.holdings.some((x) => x.symbol === h.symbol)) throw new Error('이미 추가된 티커예요.');
       state.holdings.push(h);
       if (state.settings.demo) state.settings.demo = false;
       saveState();
       ui.addForm.reset();
-      ui.formMsg.textContent = `${h.symbol} 추가 완료`;
+      ui.formMsg.textContent = `${displayName(h)} 추가 완료`;
       renderHoldingsList();
       restart();
     } catch (e) {
@@ -889,6 +1009,7 @@
     renderKeyStatus();
     ui.settingsMsg.textContent = 'Twelve Data 키를 저장했어요.';
     restart();
+    retryFx();
   });
   $('deleteTdKeyBtn').addEventListener('click', () => {
     removeKey(TD_KEY_KEY);
@@ -898,6 +1019,7 @@
   });
   function openSettings() {
     $('fFx').value = String(state.settings.fxRate);
+    $('fFxAuto').checked = state.settings.fxAuto;
     $('fRange').value = String(state.settings.range);
     $('fDemo').checked = state.settings.demo;
     $('fRemember').checked = state.settings.rememberKeys;
@@ -928,12 +1050,14 @@
     for (const k of [STORE_KEY, API_KEY_KEY, TD_KEY_KEY, HIST_KEY]) { storeRemove(k); sessRemove(k); }
     state.holdings = []; state.settings = validateSettings(null);
     state.daily.clear(); state.intraday.clear();
+    state.fx = { status: 'idle', rate: null, at: null, reason: '' };
     ui.settingsDlg.close();
     restart();
   });
   $('saveSettingsBtn').addEventListener('click', () => {
     try {
       state.settings.fxRate = toNumber($('fFx').value, { min: 1, max: 100000 });
+      state.settings.fxAuto = $('fFxAuto').checked; // 끄면 직접 입력값만 써요
       state.settings.range = toNumber($('fRange').value, { min: 0.5, max: 20 });
       state.settings.demo = $('fDemo').checked;
       const remember = $('fRemember').checked;
@@ -948,6 +1072,7 @@
       saveHistCache(); // 과거 가격 캐시도 같은 스위치를 따라요
       ui.settingsMsg.textContent = '적용했어요.';
       restart();
+      retryFx(); // 자동을 켰는데 아직 못 받았으면 한 번 받아요 (이미 받았으면 요청 없음)
     } catch (e) {
       ui.settingsMsg.textContent = e.message;
     }
@@ -965,7 +1090,7 @@
     state.settings.masked = !state.settings.masked;
     saveState(); scheduleRender(true);
   });
-  ui.map.addEventListener('pointerleave', () => { ui.tooltip.hidden = true; });
+  ui.map.addEventListener('pointerleave', (ev) => { if (ev.pointerType === 'mouse') hideTip(); });
   if ('ResizeObserver' in window) {
     let rt = null;
     new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => scheduleRender(true), 150); }).observe(ui.map);
@@ -980,4 +1105,5 @@
   loadHistCache();
   updateMarketBadge();
   restart();
+  requestFx(); // 앱을 열 때 환율 한 번
 })();
