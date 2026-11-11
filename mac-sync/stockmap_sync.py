@@ -188,6 +188,15 @@ def load_groups():
     return out
 
 
+def clean_name(v):
+    """보유 종목 응답(HoldingsItem)의 'name'(종목명) 필드. 새 호출 없이 응답에 있는 값만 써요.
+    없거나 비어 있으면 None (결과 파일에서 비워 둠). 스톡맵이 가져올 때 한 번 더 검사해요."""
+    if not isinstance(v, str):
+        return None
+    v = re.sub(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]", "", v).strip()[:20]
+    return v or None
+
+
 def build_holdings(items, groups):
     merged = {}
     skipped = []
@@ -208,14 +217,14 @@ def build_holdings(items, groups):
             m["qty"] = total
             if last is not None and last > 0:
                 m["last"] = last
+            if m["name"] is None:  # 앞 계좌 응답에 이름이 없었으면 이 응답의 이름을 써요
+                m["name"] = clean_name(it.get("name"))
         else:
             country = it.get("marketCountry")
             default_group = "미국" if country == "US" else ("한국" if country == "KR" else "기타")
-            name = it.get("name")
             merged[sym] = {"qty": qty, "avg": avg, "last": last if last and last > 0 else None,
                            "cur": cur, "group": groups.get(sym) or default_group,
-                           # 종목명은 표시용. 스톡맵이 가져올 때 한 번 더 검사해요.
-                           "name": name.strip()[:20] if isinstance(name, str) and name.strip() else None}
+                           "name": clean_name(it.get("name"))}
     out = []
     for sym, m in merged.items():
         out.append({
