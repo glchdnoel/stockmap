@@ -24,7 +24,7 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .value.down { color: var(--down); }
 .spacer { flex: 1; }
 .periods { display: inline-flex; background: #0f1115; border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
-.period-btn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.period-btn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer; }
 .period-btn:hover { color: var(--text); }
 .period-btn.active { background: var(--accent); color: #fff; }
 .muted { color: var(--muted); }
@@ -41,6 +41,8 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .btn.danger { color: var(--down); }
 .icon-btn { background: none; border: 0; cursor: pointer; font-size: 14px; padding: 0 2px; opacity: .7; }
 .icon-btn:hover { opacity: 1; }
+.link-btn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; padding: 0 2px; text-decoration: underline; text-underline-offset: 2px; }
+.link-btn:hover { color: var(--text); }
 
 .banner { margin: 0; padding: 8px 14px; background: #1d2330; color: #c9d4e6; font-size: 13px; border-bottom: 1px solid var(--line); }
 .banner.error { background: #2a1719; color: #f2b8ba; }
@@ -97,4 +99,5 @@ input[type=checkbox] { width: 16px; height: 16px; }
   .grid-form { grid-template-columns: 1fr 1fr; }
   .topbar { gap: 8px; }
   #updated { display: none; }
+  .periods { order: 10; width: 100%; justify-content: space-between; }
 }

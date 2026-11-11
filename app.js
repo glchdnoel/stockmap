@@ -38,7 +38,9 @@
   const TD_URL = 'https://api.twelvedata.com/time_series';
   const TD_SPACING = 8000;                 // 8초에 1건 → 분당 7.5건
   const DAILY_MAX_AGE = 6 * 60 * 60 * 1000; // 일봉은 6시간마다 새로
-  const PERIODS = { '1h': '1시간', day: '오늘', '1w': '1주', '1m': '1달' };
+  const PERIODS = { '1h': '1시간', day: '오늘', '1w': '1주', '1m': '1달', '3m': '3달', '6m': '6달', '1y': '1년', '3y': '3년' };
+  const PERIOD_DAYS = { '1w': 7, '1m': 30, '3m': 91, '6m': 182, '1y': 365, '3y': 1095 };
+  const DAILY_BARS = 800; // 약 3년치 거래일 (요청 1건 = 무료 한도 1건, 길이와 무관)
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/;
 
@@ -91,12 +93,13 @@
     return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice };
   }
   function validateSettings(raw) {
-    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day' };
+    const s = { fxRate: 1400, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true };
     if (!raw || typeof raw !== 'object') return s;
     try { s.fxRate = toNumber(raw.fxRate, { min: 1, max: 100000 }); } catch (e) { /* 기본값 */ }
     try { s.range = toNumber(raw.range, { min: 0.5, max: 20 }); } catch (e) { /* 기본값 */ }
     s.masked = raw.masked === true;
     s.demo = raw.demo === true;
+    s.rememberKeys = raw.rememberKeys !== false;
     if (Object.prototype.hasOwnProperty.call(PERIODS, raw.period)) s.period = raw.period;
     return s;
   }
@@ -140,14 +143,21 @@
   function saveState() {
     storeSet(STORE_KEY, JSON.stringify({ version: 1, settings: state.settings, holdings: state.holdings }));
   }
-  function getApiKey() {
-    const k = storeGet(API_KEY_KEY);
+  // API 키: "기억하기"를 끄면 sessionStorage(탭을 닫으면 삭제)에 둔다.
+  function sessGet(key) { try { return window.sessionStorage.getItem(key); } catch (e) { return memoryStore.get('s:' + key) ?? null; } }
+  function sessSet(key, v) { try { window.sessionStorage.setItem(key, v); } catch (e) { memoryStore.set('s:' + key, v); } }
+  function sessRemove(key) { try { window.sessionStorage.removeItem(key); } catch (e) { /* ignore */ } memoryStore.delete('s:' + key); }
+  function readKey(name) {
+    const k = storeGet(name) || sessGet(name);
     return k && API_KEY_RE.test(k) ? k : null;
   }
-  function getTdKey() {
-    const k = storeGet(TD_KEY_KEY);
-    return k && API_KEY_RE.test(k) ? k : null;
+  function writeKey(name, value) {
+    if (state.settings.rememberKeys) { storeSet(name, value); sessRemove(name); }
+    else { sessSet(name, value); storeRemove(name); }
   }
+  function removeKey(name) { storeRemove(name); sessRemove(name); }
+  function getApiKey() { return readKey(API_KEY_KEY); }
+  function getTdKey() { return readKey(TD_KEY_KEY); }
   // 일봉 캐시 (가격 숫자만 저장, 형식 검사 후 사용)
   function loadHistCache() {
     try {
@@ -155,8 +165,8 @@
       if (!data || typeof data !== 'object') return;
       for (const [sym, v] of Object.entries(data).slice(0, MAX_HOLDINGS)) {
         if (!SYMBOL_RE.test(sym) || !v || !Array.isArray(v.bars) || !Number.isFinite(v.fetchedAt)) continue;
-        const bars = v.bars.slice(0, 40).filter((b) => Array.isArray(b) && DATE_RE.test(b[0]) && Number.isFinite(b[1]) && b[1] > 0);
-        if (bars.length) state.daily.set(sym, { fetchedAt: v.fetchedAt, bars });
+        const bars = v.bars.slice(0, DAILY_BARS).filter((b) => Array.isArray(b) && DATE_RE.test(b[0]) && Number.isFinite(b[1]) && b[1] > 0);
+        if (bars.length) state.daily.set(sym, { fetchedAt: v.fetchedAt, bars, full: v.full === true });
       }
     } catch (e) { /* 캐시가 깨졌으면 무시 */ }
   }
@@ -232,15 +242,17 @@
     const period = state.settings.period;
     if (state.mode === 'demo') {
       const b = state.demoBases[period] && state.demoBases[period][symbol];
-      return b ? { price: b, label: PERIODS[period] + ' 전 (가상)' } : null;
+      return b ? { price: b, label: PERIODS[period] + ' 전 (예시)' } : null;
     }
     if (period === 'day') return q && q.prevClose > 0 ? { price: q.prevClose, label: '전일 종가' } : null;
-    if (period === '1w' || period === '1m') {
+    if (PERIOD_DAYS[period]) {
       const d = state.daily.get(symbol);
       if (!d) return null;
-      const target = nyDate(Date.now() - (period === '1w' ? 7 : 30) * 86400000);
+      const target = nyDate(Date.now() - PERIOD_DAYS[period] * 86400000);
       const bar = d.bars.find((b) => b[0] <= target);
-      return bar ? { price: bar[1], label: `${bar[0].slice(5).replace('-', '/')} 종가` } : null;
+      if (!bar) return d.full ? { missing: true } : null; // 상장한 지 얼마 안 된 종목 등
+      const label = `${bar[0].replace(/-/g, '.')} 종가` + (PERIOD_DAYS[period] >= 91 ? ' (배당 제외)' : '');
+      return { price: bar[1], label };
     }
     if (period === '1h') {
       const d = state.intraday.get(symbol);
@@ -260,7 +272,7 @@
     const shownPrice = price ?? (h.avgPrice > 0 ? h.avgPrice : null);
     const value = (shownPrice ?? 0) * h.shares * fx(h);
     const base = live ? baseFor(h.symbol, q) : null;
-    const ok = price != null && base && base.price > 0;
+    const ok = price != null && base && !base.missing && base.price > 0;
     const dp = ok ? ((price - base.price) / base.price) * 100 : NaN;
     const dayChange = ok ? (price - base.price) * h.shares * fx(h) : 0;
     const dayBase = ok ? base.price * h.shares * fx(h) : 0;
@@ -325,9 +337,10 @@
       const w = leaf.x1 - leaf.x0; const h = leaf.y1 - leaf.y0;
       box.dataset.symbol = leaf.data.h.symbol;
       box.dataset.size = w < 44 || h < 26 ? 'xs' : (w < 90 || h < 52 ? 's' : (w * h > 40000 ? 'l' : 'm'));
-      const fontBase = Math.max(11, Math.min(28, Math.sqrt(w * h) / 6));
+      // 좁은 박스에서 글자가 잘리지 않도록 너비에 맞춰 글자 크기를 줄인다
+      const fontBase = Math.max(9, Math.min(28, Math.sqrt(w * h) / 6, w / 4));
       const sym = el('div', 'sym'); sym.style.fontSize = fontBase + 'px';
-      const pct = el('div', 'pct'); pct.style.fontSize = Math.max(10, fontBase * 0.7) + 'px';
+      const pct = el('div', 'pct'); pct.style.fontSize = Math.max(8, Math.min(fontBase * 0.7, w / 5.5)) + 'px';
       const val = el('div', 'val');
       box.append(sym, pct, val);
       attachTooltip(box);
@@ -343,6 +356,13 @@
     node.style.width = Math.max(0, d.x1 - d.x0) + 'px';
     node.style.height = Math.max(0, d.y1 - d.y0) + 'px';
   }
+  function leafStatus(r) {
+    if (!r.live) return r.h.manualPrice ? '수동 가격' : '시세 없음';
+    if (r.base && r.base.missing) return '기간 부족';
+    if (state.settings.period !== 'day' && state.histUnsupported.has(r.h.symbol)) return '데이터 없음';
+    if (state.settings.period !== 'day' && !getTdKey()) return '키 필요';
+    return '받는 중';
+  }
   function updateLeaves(rows) {
     for (const r of rows) {
       const ref = state.leafEls.get(r.h.symbol);
@@ -352,7 +372,7 @@
       ref.box.classList.toggle('nodata', !color);
       ref.box.style.backgroundColor = color || '';
       ref.sym.textContent = size === 'xs' ? '' : r.h.symbol;
-      ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : (r.live ? (state.histUnsupported.has(r.h.symbol) && state.settings.period !== 'day' ? '기간 미지원' : '불러오는 중') : (r.h.manualPrice ? '직접 입력' : '시세 없음')));
+      ref.pct.textContent = size === 'xs' ? '' : (Number.isFinite(r.dp) ? fmtPct(r.dp) : leafStatus(r));
       ref.val.textContent = size === 'l' ? fmtKRW(r.value) : '';
       const prev = state.lastPrice.get(r.h.symbol);
       if (prev != null && r.price != null && prev !== r.price) {
@@ -369,6 +389,7 @@
     let total = 0; let change = 0; let base = 0;
     for (const r of rows) { total += r.value; change += r.dayChange; base += r.dayBase; }
     ui.total.textContent = fmtKRW(total);
+    ui.maskBtn.textContent = state.settings.masked ? '보기' : '숨기기';
     $('periodLabel').textContent = PERIODS[state.settings.period];
     document.querySelectorAll('.period-btn').forEach((b) => b.classList.toggle('active', b.dataset.period === state.settings.period));
     const pct = base > 0 ? (change / base) * 100 : NaN;
@@ -405,7 +426,7 @@
       const rowsData = [
         ['현재가', fmtPrice(r.price, h.currency) + (r.live ? '' : ' (직접입력/평단)')],
         [PERIODS[state.settings.period] + ' 등락', fmtPct(r.dp)],
-        ['기준가', r.base ? `${fmtPrice(r.base.price, h.currency)} · ${r.base.label}` : '—'],
+        ['기준가', r.base && !r.base.missing ? `${fmtPrice(r.base.price, h.currency)} · ${r.base.label}` : '—'],
         ['보유 수량', nfNum.format(h.shares)],
         ['평균 단가', fmtPrice(h.avgPrice, h.currency)],
         ['평가액', fmtKRW(r.value)],
@@ -553,14 +574,14 @@
       method: 'GET', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', redirect: 'error',
     });
     const text = await res.text();
-    if (text.length > 200000) throw new Error('응답이 너무 커요.');
+    if (text.length > 400000) throw new Error('응답이 너무 커요.');
     let j;
     try { j = JSON.parse(text); } catch (e) { throw new Error('응답 형식 오류'); }
     const code = Number(j && j.code) || res.status;
     if (code === 401 || code === 403) throw Object.assign(new Error('Twelve Data 키가 올바르지 않거나 권한이 없어요.'), { fatal: true });
     if (code === 429) throw Object.assign(new Error('한도 초과'), { retry: true });
     if (!j || j.status !== 'ok' || !Array.isArray(j.values)) throw Object.assign(new Error('지원하지 않는 종목'), { unsupported: true });
-    return j.values.slice(0, 60);
+    return j.values.slice(0, DAILY_BARS);
   }
 
   function parseDaily(values) {
@@ -601,8 +622,8 @@
       td.last = Date.now();
       try {
         if (job.kind === 'daily') {
-          const bars = parseDaily(await fetchSeries(job.symbol, '1day', 30, job.key));
-          if (bars.length) { state.daily.set(job.symbol, { fetchedAt: Date.now(), bars }); saveHistCache(); }
+          const bars = parseDaily(await fetchSeries(job.symbol, '1day', DAILY_BARS, job.key));
+          if (bars.length) { state.daily.set(job.symbol, { fetchedAt: Date.now(), bars, full: true }); saveHistCache(); }
         } else {
           const bars = parseIntraday(await fetchSeries(job.symbol, '5min', 24, job.key));
           if (bars.length) state.intraday.set(job.symbol, { fetchedAt: Date.now(), bars });
@@ -627,7 +648,7 @@
   function updateHistBanner() {
     if (state.mode !== 'live' || state.settings.period === 'day') return;
     const n = td.queue.length;
-    if (n > 0) showBanner(`${PERIODS[state.settings.period]} 기준 데이터를 불러오는 중이에요 (남은 종목 ${n}개 · 무료 한도 때문에 종목당 약 8초).`);
+    if (n > 0) showBanner(`${PERIODS[state.settings.period]} 전 가격을 받는 중 · ${n}종목 남음 (종목당 약 8초)`);
     else if (!ui.banner.classList.contains('error')) showBanner('');
   }
 
@@ -639,14 +660,14 @@
     clearInterval(td.intradayTimer);
     if (period === 'day') { updateHistBanner(); return; }
     if (!key) {
-      showBanner(`${PERIODS[period]} 등락률을 보려면 설정에서 Twelve Data API 키를 넣어 주세요. (오늘 등락은 키 없이도 돼요)`);
+      showBanner(`${PERIODS[period]} 등락을 보려면 설정에서 Twelve Data 키를 넣어 주세요.`);
       return;
     }
     const usd = state.holdings.filter((h) => h.currency === 'USD' && !state.histUnsupported.has(h.symbol));
-    if (period === '1w' || period === '1m') {
+    if (PERIOD_DAYS[period]) {
       for (const h of usd) {
         const d = state.daily.get(h.symbol);
-        if (!d || Date.now() - d.fetchedAt > DAILY_MAX_AGE) tdEnqueue(runId, h.symbol, 'daily', key);
+        if (!d || !d.full || Date.now() - d.fetchedAt > DAILY_MAX_AGE) tdEnqueue(runId, h.symbol, 'daily', key);
       }
     } else if (period === '1h') {
       // 하루 800건 한도: 종목이 많을수록 새로고침 간격을 늘린다 (최소 10분)
@@ -692,10 +713,10 @@
     ],
     base: { VOO: 500, QQQ: 470, VTI: 270, SCHD: 27, JEPI: 56, SOXX: 225, SMH: 255, TLT: 88 },
   };
-  const DEMO_BANNER = '데모 화면이에요 (가상 데이터). 종목 관리에서 내 종목을 추가하면 내 포트폴리오로 바뀌어요.';
+  const DEMO_BANNER = '예시 화면이에요. [종목 관리]에서 내 종목을 넣으면 내 포트폴리오로 바뀌어요.';
   function startDemo(runId) {
     state.quotes.clear();
-    const spread = { '1h': 0.012, day: 0.05, '1w': 0.1, '1m': 0.2 };
+    const spread = { '1h': 0.012, day: 0.05, '1w': 0.1, '1m': 0.2, '3m': 0.3, '6m': 0.4, '1y': 0.6, '3y': 1.0 };
     state.demoBases = {};
     for (const p of Object.keys(PERIODS)) state.demoBases[p] = {};
     for (const [s, pc] of Object.entries(DEMO.base)) {
@@ -742,7 +763,7 @@
     scheduleRender(true);
     if (!key) {
       setConn('API 키 없음', 'bad');
-      showBanner('설정에서 Finnhub API 키를 넣으면 내 종목의 등락이 표시돼요. 지금은 직접 입력한 가격이나 평단 기준으로 보여요.');
+      showBanner('설정에서 Finnhub 키를 넣으면 등락이 표시돼요.');
       return;
     }
     if (!storageOk) showBanner('이 브라우저는 저장소를 쓸 수 없어 새로고침하면 데이터가 사라져요.', true);
@@ -851,13 +872,13 @@
     const k = input.value.trim();
     input.value = '';
     if (!API_KEY_RE.test(k)) { ui.settingsMsg.textContent = 'Twelve Data 키 형식이 올바르지 않아요 (영문·숫자만).'; return; }
-    storeSet(TD_KEY_KEY, k);
+    writeKey(TD_KEY_KEY, k);
     renderKeyStatus();
     ui.settingsMsg.textContent = 'Twelve Data 키를 저장했어요.';
     restart();
   });
   $('deleteTdKeyBtn').addEventListener('click', () => {
-    storeRemove(TD_KEY_KEY);
+    removeKey(TD_KEY_KEY);
     renderKeyStatus();
     ui.settingsMsg.textContent = 'Twelve Data 키를 삭제했어요.';
     restart();
@@ -866,6 +887,7 @@
     $('fFx').value = String(state.settings.fxRate);
     $('fRange').value = String(state.settings.range);
     $('fDemo').checked = state.settings.demo;
+    $('fRemember').checked = state.settings.rememberKeys;
     ui.fKey.value = '';
     ui.settingsMsg.textContent = '';
     renderKeyStatus();
@@ -876,15 +898,23 @@
     const k = ui.fKey.value.trim();
     ui.fKey.value = '';
     if (!API_KEY_RE.test(k)) { ui.settingsMsg.textContent = '키 형식이 올바르지 않아요 (영문·숫자만).'; return; }
-    storeSet(API_KEY_KEY, k);
+    writeKey(API_KEY_KEY, k);
     renderKeyStatus();
     ui.settingsMsg.textContent = '키를 저장했어요.';
     restart();
   });
   $('deleteKeyBtn').addEventListener('click', () => {
-    storeRemove(API_KEY_KEY);
+    removeKey(API_KEY_KEY);
     renderKeyStatus();
     ui.settingsMsg.textContent = '키를 삭제했어요.';
+    restart();
+  });
+  $('wipeBtn').addEventListener('click', () => {
+    if (!window.confirm('키, 보유 종목, 저장된 가격을 이 기기에서 모두 지울까요? 되돌릴 수 없어요.')) return;
+    for (const k of [STORE_KEY, API_KEY_KEY, TD_KEY_KEY, HIST_KEY]) { storeRemove(k); sessRemove(k); }
+    state.holdings = []; state.settings = validateSettings(null);
+    state.daily.clear(); state.intraday.clear();
+    ui.settingsDlg.close();
     restart();
   });
   $('saveSettingsBtn').addEventListener('click', () => {
@@ -892,6 +922,13 @@
       state.settings.fxRate = toNumber($('fFx').value, { min: 1, max: 100000 });
       state.settings.range = toNumber($('fRange').value, { min: 0.5, max: 20 });
       state.settings.demo = $('fDemo').checked;
+      const remember = $('fRemember').checked;
+      if (remember !== state.settings.rememberKeys) {
+        const a = getApiKey(); const t = getTdKey();
+        state.settings.rememberKeys = remember;
+        if (a) writeKey(API_KEY_KEY, a);
+        if (t) writeKey(TD_KEY_KEY, t);
+      }
       saveState();
       ui.settingsMsg.textContent = '적용했어요.';
       restart();

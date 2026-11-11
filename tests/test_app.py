@@ -123,7 +123,7 @@ with sync_playwright() as p:
     from zoneinfo import ZoneInfo
     ny = ZoneInfo("America/New_York")
     today = datetime.now(ny).date()
-    days = [today - timedelta(days=i) for i in range(1, 45) if (today - timedelta(days=i)).weekday() < 5][:30]
+    days = [today - timedelta(days=i) for i in range(1, 1300) if (today - timedelta(days=i)).weekday() < 5][:800]
     td_calls = []
     def daily_close(sym, d):  # 날짜마다 다른 가격
         return {"VOO": 400, "QQQ": 500, "SOXX": 200}[sym] + (today - d).days
@@ -133,7 +133,8 @@ with sync_playwright() as p:
         sym, interval = q["symbol"][0], q["interval"][0]
         td_calls.append((sym, interval, q.get("apikey", [""])[0]))
         if interval == "1day":
-            vals = [{"datetime": d.isoformat(), "close": str(daily_close(sym, d))} for d in days]
+            dd = days[:100] if sym == "SOXX" else days  # SOXX는 상장 100일짜리로 가정
+            vals = [{"datetime": d.isoformat(), "close": str(daily_close(sym, d))} for d in dd]
             vals.insert(0, {"datetime": "<img src=x onerror=alert(9)>", "close": "1"})
         else:
             base = datetime(2026, 11, 10, 15, 55)
@@ -158,6 +159,18 @@ with sync_playwright() as p:
     exp = (500 - daily_close("VOO", base_d)) / daily_close("VOO", base_d) * 100
     got = page.text_content(".leaf[data-symbol=VOO] .pct")
     check("1달 등락 (캐시 사용, 추가 요청 없음)", got == f"{exp:+.2f}%" and len(td_calls) == 3, f"{got} vs {exp:+.2f}%, calls={len(td_calls)}")
+    def exp_for(days_back):
+        t = (datetime.now(ny) - timedelta(days=days_back)).date()
+        bd = next(d for d in days if d <= t)
+        return f"{(500 - daily_close('VOO', bd)) / daily_close('VOO', bd) * 100:+.2f}%"
+    for per, n in [("3m", 91), ("6m", 182), ("1y", 365), ("3y", 1095)]:
+        page.click(f".period-btn[data-period='{per}']"); page.wait_for_timeout(400)
+        got = page.text_content(".leaf[data-symbol=VOO] .pct")
+        check(f"{per} 등락 계산(추가 요청 없음)", got == exp_for(n) and len(td_calls) == 3, f"{got} vs {exp_for(n)}, calls={len(td_calls)}")
+    check("짧은 이력 종목은 '기간 부족'", page.text_content(".leaf[data-symbol=SOXX] .pct") == "기간 부족", page.text_content(".leaf[data-symbol=SOXX] .pct"))
+    page.hover(".leaf[data-symbol=VOO]"); page.wait_for_timeout(200)
+    check("장기 기준가에 배당 제외 표시", "배당 제외" in page.inner_text("#tooltip"), page.inner_text("#tooltip"))
+    page.mouse.move(5, 5)
     page.click(".period-btn[data-period='1h']"); page.wait_for_timeout(18000)
     exp = (500 - 112) / 112 * 100  # 새로고침 후 현재가 500(REST), 15:55 기준 1시간 전 = 14:55 → close 100+12
     got = page.text_content(".leaf[data-symbol=VOO] .pct")
@@ -170,6 +183,16 @@ with sync_playwright() as p:
     page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(500)
     page.mouse.move(5, 5); page.wait_for_timeout(300)
     page.screenshot(path="./week.png")
+
+    # 7) 보안 설정: 키 기억 끄기, 전체 삭제
+    page.on("dialog", lambda d: d.accept())
+    page.click("#settingsBtn"); page.uncheck("#fRemember"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    st = page.evaluate("() => [localStorage.getItem('stockmap.apikey'), sessionStorage.getItem('stockmap.apikey'), localStorage.getItem('stockmap.tdkey'), sessionStorage.getItem('stockmap.tdkey')]")
+    check("기억 끄면 키가 세션에만", st[0] is None and st[2] is None and st[1] and st[3], str(st))
+    page.click("#wipeBtn"); page.wait_for_timeout(500)
+    st = page.evaluate("() => [localStorage.length, sessionStorage.length]")
+    check("모든 데이터 지우기", st == [0, 0], str(st))
+    check("금액 숨기기 버튼 글자", page.text_content("#maskBtn") == "숨기기", page.text_content("#maskBtn"))
     b.close()
 
 fails = [r for r in results if not r[1]]

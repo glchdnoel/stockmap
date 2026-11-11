@@ -21,7 +21,7 @@
     <div class="stat">
       <span class="label">총 평가액</span>
       <span id="total" class="value">-</span>
-      <button id="maskBtn" class="icon-btn" type="button" aria-label="금액 가리기/보이기">👁</button>
+      <button id="maskBtn" class="link-btn" type="button">숨기기</button>
     </div>
     <div class="stat">
       <span id="periodLabel" class="label">오늘</span>
@@ -32,6 +32,10 @@
       <button type="button" class="period-btn" data-period="day">오늘</button>
       <button type="button" class="period-btn" data-period="1w">1주</button>
       <button type="button" class="period-btn" data-period="1m">1달</button>
+      <button type="button" class="period-btn" data-period="3m">3달</button>
+      <button type="button" class="period-btn" data-period="6m">6달</button>
+      <button type="button" class="period-btn" data-period="1y">1년</button>
+      <button type="button" class="period-btn" data-period="3y">3년</button>
     </div>
     <div class="spacer"></div>
     <span id="market" class="badge">-</span>
@@ -82,7 +86,7 @@
     <h2>설정</h2>
     <section class="setting">
       <h3>Finnhub API 키</h3>
-      <p class="muted small">키는 이 브라우저(localStorage)에만 저장되며 GitHub나 다른 곳으로 전송되지 않아요. 공용 PC에서는 쓰고 나서 꼭 삭제하세요.</p>
+      <p class="muted small">오늘 등락과 실시간 가격에 써요. 키는 이 브라우저에만 저장되고 다른 곳으로 보내지 않아요.</p>
       <p id="keyStatus" class="small"></p>
       <form id="keyForm" class="row" autocomplete="off" novalidate>
         <input id="fKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
@@ -91,8 +95,8 @@
       </form>
     </section>
     <section class="setting">
-      <h3>Twelve Data API 키 (1시간·1주·1달 등락용)</h3>
-      <p class="muted small">기간별 등락률에 필요한 과거 가격을 가져와요. 무료 한도(분당 8건)를 지키려고 종목당 약 8초 간격으로 천천히 불러와요. 이 키도 이 브라우저에만 저장돼요.</p>
+      <h3>Twelve Data API 키</h3>
+      <p class="muted small">1시간, 1주~3년 등락에 쓰는 과거 가격을 받아요. 무료 한도 때문에 종목당 약 8초씩 걸려요.</p>
       <p id="tdKeyStatus" class="small"></p>
       <form id="tdKeyForm" class="row" autocomplete="off" novalidate>
         <input id="fTdKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
@@ -104,7 +108,13 @@
       <h3>표시</h3>
       <label class="row">USD → KRW 환율 <input id="fFx" type="number" step="any" min="1" max="100000"></label>
       <label class="row">색상 최대 기준(±%) <input id="fRange" type="number" step="0.5" min="0.5" max="20"></label>
-      <label class="row"><input id="fDemo" type="checkbox"> 데모 화면 보기 (가상 데이터)</label>
+      <label class="row"><input id="fDemo" type="checkbox"> 예시 화면 보기</label>
+    </section>
+    <section class="setting">
+      <h3>보안</h3>
+      <label class="row"><input id="fRemember" type="checkbox"> 이 기기에 키 기억하기</label>
+      <p class="muted small">끄면 탭을 닫을 때 키가 지워져요. 공용 PC나 남과 같이 쓰는 기기라면 꺼 두세요.</p>
+      <button id="wipeBtn" class="btn danger" type="button">이 기기에서 모든 데이터 지우기</button>
     </section>
     <p id="settingsMsg" class="form-msg" aria-live="polite"></p>
     <div class="dlg-actions">
