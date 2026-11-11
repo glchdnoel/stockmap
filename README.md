@@ -36,5 +36,6 @@
 - `SECURITY.md`: 보안 설계와 남은 위험
 - `PROMPTS.md`: 사용한 프롬프트, Aside 점검용 프롬프트
 - `tests/test_app.py`: 자동 보안·동작 점검 (Playwright)
+- `mac-sync/`: 토스증권 보유 종목을 가져오기 파일로 만드는 맥 전용 프로그램 (조회 전용)
 
 이 앱은 정보 표시용이며 투자 조언이 아니에요.

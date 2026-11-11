@@ -1,0 +1,4 @@
+__pycache__/
+# 개인 정보가 들어가는 파일은 올리지 않아요
+mac-sync/groups.json
+stockmap-holdings.json
