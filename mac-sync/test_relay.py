@@ -227,27 +227,25 @@ class FeedTest(unittest.TestCase):
 
 
 class OpenAppTest(unittest.TestCase):
-    def run_with(self, ok_names):
+    def run_with(self, ok):
         calls = []
         def fake_run(cmd, **kw):
             calls.append(cmd)
-            name = cmd[2]
-            return mock.Mock(returncode=0 if name in ok_names else 1)
+            return mock.Mock(returncode=0 if ok(cmd) else 1)
         with mock.patch.object(r.subprocess, "run", fake_run), mock.patch("builtins.print"):
             return r.open_app(), calls
 
-    def test_prefers_installed_app(self):
-        got, calls = self.run_with({"스톡맵 - 내 포트폴리오", "Google Chrome"})
-        self.assertEqual(got, "스톡맵 - 내 포트폴리오")
-        self.assertEqual(len(calls), 1)
+    def test_opens_chrome_app_window(self):
+        got, calls = self.run_with(lambda cmd: True)
+        self.assertEqual(calls, [["/usr/bin/open", "-na", "Google Chrome", "--args", f"--app={r.APP_URL}"]])
+        self.assertTrue(all("Google Chrome" in c for c in calls))  # 이름이 같은 사파리 웹앱을 열지 않아요
 
     def test_falls_back_to_chrome_tab(self):
-        got, calls = self.run_with({"Google Chrome"})
-        self.assertEqual(got, "Google Chrome")
-        self.assertEqual(calls[-1], ["/usr/bin/open", "-a", "Google Chrome", r.APP_URL])
+        got, calls = self.run_with(lambda cmd: "--args" not in cmd)
+        self.assertEqual(got, ["/usr/bin/open", "-a", "Google Chrome", r.APP_URL])
 
     def test_nothing_found(self):
-        got, _ = self.run_with(set())
+        got, _ = self.run_with(lambda cmd: False)
         self.assertIsNone(got)
 
 
