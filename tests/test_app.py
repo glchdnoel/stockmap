@@ -505,6 +505,13 @@ with sync_playwright() as p:
     check("중계 요청에 토큰 헤더, 쿠키 없음", all(t == RT and c is None for _, t, c in relay["calls"]), str([(t == RT, c) for _, t, c in relay["calls"]]))
     check("중계는 2초 간격", 1 <= len(relay["calls"]) <= 3, str(len(relay["calls"])))
     check("'오늘'에서는 과거 가격 요청 안 함", not relay["hist"], str(relay["hist"]))
+    # 기간을 바꿔도 위 줄(기간 버튼·관리 버튼)이 움직이지 않아야 해요
+    bar_pos = lambda: page.evaluate("() => ['.periods', '#manageBtn', '#settingsBtn'].map(q => { const r = document.querySelector(q).getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; })")
+    positions = [bar_pos()]
+    for per in ("1h", "1w", "1m", "3y", "day"):
+        page.click(f".period-btn[data-period='{per}']"); page.wait_for_timeout(400)
+        positions.append(bar_pos())
+    check("기간을 바꿔도 기간 버튼·관리 버튼 위치 고정", all(p == positions[0] for p in positions), str(positions))
     page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(1500)
     exp = f"{(1233000 - 1007000) / 1007000 * 100:+.2f}%"
     got = page.text_content(".leaf[data-symbol='000660'] .pct")

@@ -17,6 +17,7 @@
 </head>
 <body>
   <header class="topbar">
+    <div class="bar-row bar-main">
     <div class="brand"><span class="logo" aria-hidden="true">▦</span> 내 포트폴리오</div>
     <div class="stat">
       <span class="label">총 평가액</span>
@@ -38,13 +39,17 @@
       <button type="button" class="period-btn" data-period="3y">3년</button>
     </div>
     <div class="spacer"></div>
+    <button id="manageBtn" class="btn" type="button">종목 관리</button>
+    <button id="settingsBtn" class="btn" type="button">설정</button>
+    </div>
+    <!-- 상태 줄: 글자 길이가 바뀌어도 위 줄(기간 버튼)이 움직이지 않게 따로 둬요 -->
+    <div class="bar-row bar-status">
     <span id="market" class="badge">-</span>
     <span id="conn" class="badge">-</span>
     <span id="relay" class="badge" hidden></span>
     <span id="updated" class="muted">-</span>
     <span id="fxInfo" class="fx-info muted">-</span>
-    <button id="manageBtn" class="btn" type="button">종목 관리</button>
-    <button id="settingsBtn" class="btn" type="button">설정</button>
+    </div>
   </header>
 
   <div id="banner" class="banner" hidden></div>

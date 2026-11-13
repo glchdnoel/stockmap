@@ -13,8 +13,17 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Malgun Gothic", system-ui, sans-serif; }
 body { display: flex; flex-direction: column; overflow: hidden; }
 
-.topbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+.topbar { display: flex; flex-direction: column; gap: 6px;
   padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 13px; }
+/* 위 줄: 이름·평가액·등락·기간 버튼·관리 버튼. 숫자 칸은 자리를 미리 잡아 둬서, 기간을 바꿔 글자 길이가 달라져도 버튼이 안 움직여요 */
+.bar-row { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.bar-main { flex-wrap: wrap; }
+.bar-status { flex-wrap: nowrap; gap: 10px; overflow: hidden; }
+#total { display: inline-block; min-width: 8.5em; white-space: nowrap; }
+#today { display: inline-block; min-width: 13em; white-space: nowrap; }
+#periodLabel { display: inline-block; min-width: 2.6em; }
+#updated, #fxInfo { white-space: nowrap; }
+#fxInfo { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .brand { font-weight: 700; font-size: 14px; }
 .logo { color: var(--accent); }
 .stat { display: flex; align-items: baseline; gap: 6px; }
@@ -103,7 +112,10 @@ input[type=checkbox] { width: 16px; height: 16px; }
 
 @media (max-width: 640px) {
   .grid-form { grid-template-columns: 1fr 1fr; }
-  .topbar { gap: 6px 8px; padding: 6px 10px; }
+  .topbar { gap: 6px; padding: 6px 10px; }
+  .bar-row { gap: 6px 8px; }
+  .bar-status { flex-wrap: wrap; }
+  #total, #today { min-width: 0; }
   #updated { display: none; }
   /* 핸드폰: 누르는 곳은 최소 44×44px */
   .btn, .icon-btn, .period-btn { min-height: 44px; min-width: 44px; }
