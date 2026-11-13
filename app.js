@@ -47,13 +47,16 @@
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/;
   // 맥 중계 (국내 종목 시세). 토스 키는 맥 키체인에만 있고, 웹앱은 이 맥 안의 중계 프로그램에서 가격 숫자만 받아요.
-  const RELAY_URL = 'http://127.0.0.1:18765/v1/prices';
+  const RELAY_BASE = 'http://127.0.0.1:18765';
+  const RELAY_URL = RELAY_BASE + '/v1/prices';
+  const RELAY_HIST_URL = RELAY_BASE + '/v1/history';
+  const RELAY_HIST_TIMEOUT = 20000; // 일봉은 중계가 토스에서 4번 나눠 받아요
   const RELAY_KEY_KEY = 'stockmap.relaytoken';
   const RELAY_TOKEN_RE = /^[0-9a-f]{40}$/;
   const KR_SYMBOL_RE = /^[0-9A-Z]{6}$/;
   const RELAY_POLL = 2000;      // 2초마다 (중계 프로그램도 2초마다 토스에서 받아요)
   const RELAY_TIMEOUT = 5000;
-  const MAX_RELAY_RESPONSE = 50000;
+  const MAX_RELAY_RESPONSE = 200000;
 
   const $ = (id) => document.getElementById(id);
   const ui = {
@@ -143,7 +146,7 @@
     intraday: new Map(),  // symbol -> { fetchedAt, bars: [[분 단위 시각, close, 'MM/DD HH:MM'], ...] (최신순) }
     histUnsupported: new Set(),
     demoBases: {},
-    relay: { timer: null, status: 'off', fails: 0, gen: 0 }, // 맥 중계 상태
+    relay: { timer: null, status: 'off', fails: 0, gen: 0, histTimer: null }, // 맥 중계 상태
     fx: { status: 'idle', rate: null, at: null, reason: '' }, // 이번에 연 앱에서 자동으로 받은 환율
   };
 
@@ -295,9 +298,11 @@
   // 뉴욕 기준 날짜 문자열 (YYYY-MM-DD)
   const nyDateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
   function nyDate(ms) { return nyDateFmt.format(new Date(ms)); }
+  const krDateFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' });
+  function krDate(ms) { return krDateFmt.format(new Date(ms)); }
 
   // 선택한 기간의 "기준가"를 찾는다. { price, label } 또는 null
-  function baseFor(symbol, q) {
+  function baseFor(symbol, q, currency) {
     const period = state.settings.period;
     if (state.mode === 'demo') {
       const b = state.demoBases[period] && state.demoBases[period][symbol];
@@ -307,10 +312,11 @@
     if (PERIOD_DAYS[period]) {
       const d = state.daily.get(symbol);
       if (!d) return null;
-      const target = nyDate(Date.now() - PERIOD_DAYS[period] * 86400000);
+      const kr = currency === 'KRW';
+      const target = (kr ? krDate : nyDate)(Date.now() - PERIOD_DAYS[period] * 86400000);
       const bar = d.bars.find((b) => b[0] <= target);
       if (!bar) return d.full ? { missing: true } : null; // 상장한 지 얼마 안 된 종목 등
-      const label = `${bar[0].replace(/-/g, '.')} 종가` + (PERIOD_DAYS[period] >= 91 ? ' (배당 제외)' : '');
+      const label = `${bar[0].replace(/-/g, '.')} 종가` + (!kr && PERIOD_DAYS[period] >= 91 ? ' (배당 제외)' : '');
       return { price: bar[1], label };
     }
     if (period === '1h') {
@@ -330,7 +336,7 @@
     else if (h.manualPrice != null && h.manualPrice > 0) { price = h.manualPrice; }
     const shownPrice = price ?? (h.avgPrice > 0 ? h.avgPrice : null);
     const value = (shownPrice ?? 0) * h.shares * fx(h);
-    const base = live ? baseFor(h.symbol, q) : null;
+    const base = live ? baseFor(h.symbol, q, h.currency) : null;
     const ok = price != null && base && !base.missing && base.price > 0;
     const dp = ok ? ((price - base.price) / base.price) * 100 : NaN;
     const dayChange = ok ? (price - base.price) * h.shares * fx(h) : 0;
@@ -422,8 +428,11 @@
   }
   function leafStatus(r) {
     if (!r.live) return r.h.manualPrice ? '수동 가격' : '시세 없음';
-    if (state.settings.period !== 'day' && r.h.currency === 'KRW') return '데이터 없음'; // 국내 종목 과거 가격은 아직 없음
     if (r.base && r.base.missing) return '기간 부족';
+    if (r.h.currency === 'KRW') { // 국내 종목 과거 가격은 맥 중계에서
+      if (state.settings.period !== 'day' && state.histUnsupported.has(r.h.symbol)) return '데이터 없음';
+      return '받는 중';
+    }
     if (state.settings.period !== 'day' && state.histUnsupported.has(r.h.symbol)) return '데이터 없음';
     if (state.settings.period !== 'day' && !getTdKey()) return '키 필요';
     return '받는 중';
@@ -664,11 +673,9 @@
     ui.relay.className = 'badge' + (kind ? ' ' + kind : '');
     ui.relay.title = detail || '';
   }
-  async function fetchRelay(token, symbols) {
-    const url = new URL(RELAY_URL);
-    url.searchParams.set('symbols', symbols.join(','));
+  async function relayGet(token, url, timeout) {
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), RELAY_TIMEOUT);
+    const timer = setTimeout(() => ctl.abort(), timeout);
     try {
       const res = await fetch(url.toString(), {
         method: 'GET', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', redirect: 'error',
@@ -679,10 +686,46 @@
       const text = await res.text();
       if (text.length > MAX_RELAY_RESPONSE) throw new Error('응답이 너무 커요.');
       const j = JSON.parse(text);
-      if (!j || typeof j !== 'object' || !Array.isArray(j.prices)) throw new Error('응답 형식 오류');
+      if (!j || typeof j !== 'object') throw new Error('응답 형식 오류');
       return j;
     } finally {
       clearTimeout(timer);
+    }
+  }
+  async function fetchRelay(token, symbols) {
+    const url = new URL(RELAY_URL);
+    url.searchParams.set('symbols', symbols.join(','));
+    const j = await relayGet(token, url, RELAY_TIMEOUT);
+    if (!Array.isArray(j.prices)) throw new Error('응답 형식 오류');
+    return j;
+  }
+  // 국내 종목 과거 가격 (기간별 등락). 형식은 Twelve Data와 같게 받아서 같은 함수로 검사해요.
+  async function relayHistory(runId, kind, symbols) {
+    const token = getRelayToken();
+    if (!token) return;
+    for (const sym of symbols) {
+      if (runId !== state.runId) return;
+      const url = new URL(RELAY_HIST_URL);
+      url.searchParams.set('symbol', sym);
+      url.searchParams.set('kind', kind);
+      try {
+        const j = await relayGet(token, url, RELAY_HIST_TIMEOUT);
+        if (runId !== state.runId) return;
+        const values = Array.isArray(j.values) ? j.values.slice(0, DAILY_BARS) : [];
+        if (kind === 'daily') {
+          const bars = parseDaily(values);
+          if (bars.length) { state.daily.set(sym, { fetchedAt: Date.now(), bars, full: j.full === true }); saveHistCache(); }
+          else if (j.ok) state.histUnsupported.add(sym);
+        } else {
+          const bars = parseIntraday(values);
+          if (bars.length) state.intraday.set(sym, { fetchedAt: Date.now(), bars });
+          else if (j.ok) state.histUnsupported.add(sym);
+        }
+      } catch (e) {
+        if (e.auth) return; // 배지가 알려줘요
+        // 중계가 꺼져 있으면 다음 기간 선택이나 다음 새로고침 때 다시 받아요
+      }
+      scheduleRender(false);
     }
   }
   function applyRelay(j, symbols) {
@@ -712,6 +755,8 @@
         if (stale()) return;
         applyRelay(j, symbols);
         state.relay.fails = 0;
+        // 중계가 (다시) 연결되면, 못 받은 과거 가격을 이어서 받아요
+        if (state.relay.status !== 'live' && state.settings.period !== 'day') requestKrHistory(runId, state.settings.period);
         if (j.ok) setRelayBadge('live', j.fetchedAt ? '맥 중계 · ' + String(j.fetchedAt).slice(11, 19) + ' 기준' : '');
         else setRelayBadge('toss', cleanText(j.status, 120));
       } catch (e) {
@@ -736,6 +781,7 @@
   function stopRelay() {
     state.relay.gen++;
     clearTimeout(state.relay.timer);
+    clearInterval(state.relay.histTimer);
     state.relay.timer = null;
     setRelayBadge('off');
   }
@@ -897,12 +943,28 @@
   }
 
   // 지금 선택된 기간에 필요한 과거 데이터를 요청한다.
+  function requestKrHistory(runId, period) {
+    clearInterval(state.relay.histTimer);
+    const krw = getRelayToken() ? relaySymbols().filter((s) => !state.histUnsupported.has(s)) : [];
+    if (!krw.length || period === 'day') return;
+    if (PERIOD_DAYS[period]) {
+      const need = krw.filter((s) => { const d = state.daily.get(s); return !d || Date.now() - d.fetchedAt > DAILY_MAX_AGE; });
+      relayHistory(runId, 'daily', need);
+    } else if (period === '1h') {
+      relayHistory(runId, 'intraday', krw);
+      state.relay.histTimer = setInterval(() => { // 중계가 1분 캐시해서 토스 호출은 1분에 한 번
+        if (runId === state.runId && state.settings.period === '1h' && !document.hidden) relayHistory(runId, 'intraday', krw);
+      }, 60000);
+    }
+  }
   function requestHistory(runId) {
     if (state.mode !== 'live') return;
     const key = getTdKey();
     const period = state.settings.period;
     clearInterval(td.intradayTimer);
+    requestKrHistory(runId, period); // 국내 종목은 맥 중계에서 (Twelve Data 키 필요 없음)
     if (period === 'day') { updateHistBanner(); return; }
+    if (!state.holdings.some((h) => h.currency === 'USD')) return;
     if (!key) {
       showBanner(`${PERIODS[period]} 등락을 보려면 설정에서 Twelve Data 키를 넣어 주세요.`);
       return;
@@ -1011,6 +1073,7 @@
     if (!key) {
       setConn(hasUsd ? 'API 키 없음' : '미국 종목 없음', hasUsd ? 'bad' : '');
       if (hasUsd) showBanner('설정에서 Finnhub 키를 넣으면 등락이 표시돼요.');
+      requestKrHistory(runId, state.settings.period); // 국내 종목 기간별 등락은 Finnhub 키와 상관없어요
       return;
     }
     if (!storageOk) showBanner('이 브라우저는 저장소를 쓸 수 없어 새로고침하면 데이터가 사라져요.', true);

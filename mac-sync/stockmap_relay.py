@@ -12,7 +12,7 @@
        - Host: 127.0.0.1 또는 localhost로 온 요청만 (DNS 리바인딩 공격 차단)
        - Origin: 스톡맵 주소에서 온 요청만 (다른 웹사이트가 몰래 부르는 것 차단)
        - 중계 토큰: 웹앱 설정에 넣은 비밀 토큰이 맞는지
-  4. 토스에 보내는 호출은 토큰 발급, 현재가, 일봉(전일 종가용) 세 개뿐이에요.
+  4. 토스에 보내는 호출은 토큰 발급, 현재가, 캔들(전일 종가·기간별 등락용) 세 개뿐이에요.
      계좌·주문 호출은 코드에 없고, 다른 호출은 보내기 전에 막아요.
   5. 아무도 시세를 요청하지 않으면 30초 뒤 토스 호출을 멈춰요.
 
@@ -54,8 +54,13 @@ MAX_SYMBOLS = 50
 POLL_SECONDS = 2.0
 IDLE_SECONDS = 30
 PREV_CLOSE_REFRESH = 30 * 60
+DAILY_PAGES = 4               # 일봉 200개씩 4번 = 약 3년+ (3년 등락까지)
+DAILY_CACHE = 6 * 60 * 60     # 일봉은 6시간마다 새로
+INTRADAY_COUNT = 90           # 1분봉 90개 (1시간 등락용)
+INTRADAY_CACHE = 60
 MAX_RESPONSE = 500_000
 TOSS_ALLOWED = {("POST", "/oauth2/token"), ("GET", "/api/v1/prices"), ("GET", "/api/v1/candles")}
+HISTORY_KINDS = {"daily", "intraday"}
 
 
 class RelayError(Exception):
@@ -69,7 +74,7 @@ def load_or_create_token(force_new=False):
     if not force_new:
         try:
             t = TOKEN_FILE.read_text(encoding="utf-8").strip()
-            if TOKEN_RE.match(t):
+            if TOKEN_RE.fullmatch(t):
                 return t, False
         except FileNotFoundError:
             pass
@@ -153,6 +158,8 @@ class TossPrices:
         self.prev = {}        # symbol -> {"close", "day", "fetched"}
         self.status = "대기 중"
         self.fetched_at = None
+        self.hist = {}        # (symbol, kind) -> {"values", "full", "at"}
+        self.hist_lock = threading.Lock()
 
     def ensure_token(self):
         if self.token:
@@ -248,6 +255,72 @@ class TossPrices:
                 self.log(f"[{datetime.now(KST):%H:%M:%S}] {e}")
             self.status = str(e)
 
+    # ---- 기간별 등락용 과거 가격 (웹앱이 기간을 고를 때만 요청해요) ----
+    def _candles(self, symbol, interval, count, before=None, adjusted=False):
+        q = {"symbol": symbol, "interval": interval, "count": count}
+        if before:
+            q["before"] = before
+        if adjusted:
+            q["adjusted"] = "true"
+        j = self._call_with_token("GET", "/api/v1/candles", q)
+        body = j.get("result", j) if isinstance(j, dict) else None
+        if not isinstance(body, dict) or not isinstance(body.get("candles"), list):
+            raise RelayError("캔들 응답 형식이 올바르지 않아요.")
+        nb = body.get("nextBefore")
+        return body["candles"], (nb if isinstance(nb, str) and len(nb) <= 40 else None)
+
+    def _daily(self, symbol):
+        out, before, full = {}, None, False
+        adjusted = True  # 액면분할 등을 반영한 가격 (안 받아 주면 원래 가격으로)
+        for _ in range(DAILY_PAGES):
+            try:
+                candles, before = self._candles(symbol, "1d", 200, before, adjusted)
+            except RelayError as e:
+                if adjusted and getattr(e, "status", None) == 400:
+                    adjusted = False
+                    candles, before = self._candles(symbol, "1d", 200, before, False)
+                else:
+                    raise
+            for c in candles:
+                t = parse_time(c.get("timestamp")) if isinstance(c, dict) else None
+                close = num(c.get("closePrice")) if isinstance(c, dict) else None
+                if t and close:
+                    out.setdefault(t.astimezone(KST).date().isoformat(), close)
+            if not before:
+                full = True  # 상장일까지 다 받음
+                break
+        else:
+            full = True  # 3년 넘게 받음
+        values = [{"datetime": d, "close": c} for d, c in sorted(out.items(), reverse=True)]
+        return values, full
+
+    def _intraday(self, symbol):
+        candles, _ = self._candles(symbol, "1m", INTRADAY_COUNT)
+        values = []
+        for c in candles:
+            t = parse_time(c.get("timestamp")) if isinstance(c, dict) else None
+            close = num(c.get("closePrice")) if isinstance(c, dict) else None
+            if t and close:
+                values.append({"datetime": t.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S"), "close": close})
+        return values, True
+
+    def history(self, symbol, kind):
+        """{"values": [{"datetime", "close"}, ...] (최신순), "full": bool, "ok": bool, "status": str}"""
+        ttl = DAILY_CACHE if kind == "daily" else INTRADAY_CACHE
+        key = (symbol, kind)
+        with self.hist_lock:  # 캔들 요청은 한 번에 하나씩
+            hit = self.hist.get(key)
+            if hit and time.time() - hit["at"] < ttl:
+                return {"values": hit["values"], "full": hit["full"], "ok": True, "status": ""}
+            try:
+                values, full = (self._daily if kind == "daily" else self._intraday)(symbol)
+            except RelayError as e:
+                if hit:  # 실패하면 예전 값이라도
+                    return {"values": hit["values"], "full": hit["full"], "ok": False, "status": str(e)}
+                return {"values": [], "full": False, "ok": False, "status": str(e)}
+            self.hist[key] = {"values": values, "full": full, "at": time.time()}
+            return {"values": values, "full": full, "ok": True, "status": ""}
+
     def snapshot(self, symbols):
         with self.lock:
             out = []
@@ -319,16 +392,25 @@ def make_handler(feed, relay_token, origins):
                 self._reject(401, "중계 토큰이 틀림")
                 return
             u = urllib.parse.urlsplit(self.path)
-            if u.path != "/v1/prices":
+            qs = urllib.parse.parse_qs(u.query)
+            if u.path == "/v1/prices":
+                raw = qs.get("symbols", [""])[0]
+                symbols = [s for s in raw.split(",") if s][:MAX_SYMBOLS + 1]
+                if not symbols or len(symbols) > MAX_SYMBOLS or not all(SYMBOL_RE.fullmatch(s) for s in symbols):
+                    self._reject(400, "종목 코드 형식 오류")
+                    return
+                feed.want(symbols)
+                data = feed.snapshot(symbols)
+            elif u.path == "/v1/history":
+                symbol, kind = qs.get("symbol", [""])[0], qs.get("kind", [""])[0]
+                if not SYMBOL_RE.fullmatch(symbol) or kind not in HISTORY_KINDS:
+                    self._reject(400, "종목 코드·종류 형식 오류")
+                    return
+                data = feed.history(symbol, kind)
+            else:
                 self._reject(404, "없는 주소")
                 return
-            raw = urllib.parse.parse_qs(u.query).get("symbols", [""])[0]
-            symbols = [s for s in raw.split(",") if s][:MAX_SYMBOLS + 1]
-            if not symbols or len(symbols) > MAX_SYMBOLS or not all(SYMBOL_RE.match(s) for s in symbols):
-                self._reject(400, "종목 코드 형식 오류")
-                return
-            feed.want(symbols)
-            body = json.dumps(feed.snapshot(symbols), ensure_ascii=False).encode("utf-8")
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self._cors(origin)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -386,7 +468,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     origins = set(DEFAULT_ORIGINS)
     for o in a.allow_origin:
-        if not re.match(r"^https?://[A-Za-z0-9.\-]+(:\d+)?$", o):
+        if not re.fullmatch(r"https?://[A-Za-z0-9.\-]+(:\d+)?", o):
             print(f"주소 형식이 올바르지 않아요: {o}")
             return 2
         origins.add(o)

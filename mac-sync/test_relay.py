@@ -24,9 +24,11 @@ ORIGIN = "https://glchdnoel.github.io"
 class FakeToss:
     """토스 서버 흉내. 받은 호출을 기록해요."""
 
-    def __init__(self):
+    def __init__(self, daily_page_limit=10, reject_adjusted=False):
         self.calls = []
         self.fail_prices_once = None
+        self.daily_page_limit = daily_page_limit
+        self.reject_adjusted = reject_adjusted
 
     def __call__(self, method, path, *, token=None, form=None, query=None):
         self.calls.append((method, path, token, dict(query or {}), dict(form or {})))
@@ -41,6 +43,23 @@ class FakeToss:
                 out.append({"symbol": s, "timestamp": "2026-11-13T19:59:59+09:00", "lastPrice": "1233000", "currency": "KRW"})
             out.append({"symbol": "999999", "lastPrice": "1", "currency": "KRW"})  # 요청 안 한 종목 → 무시
             return {"result": out}
+        if path == "/api/v1/candles" and query.get("interval") == "1m":
+            return {"result": {"candles": [
+                {"timestamp": "2026-11-13T10:59:00Z", "closePrice": "1233000"},   # UTC → 19:59 KST
+                {"timestamp": "2026-11-13T09:59:00Z", "closePrice": "1230000"},
+            ], "nextBefore": "2026-11-13T09:58:00Z"}}
+        if path == "/api/v1/candles" and query.get("count") == 200:
+            self.daily_pages = getattr(self, "daily_pages", 0) + 1
+            if self.reject_adjusted and query.get("adjusted"):
+                e = r.RelayError("bad param"); e.status, e.code = 400, "invalid-parameter"
+                raise e
+            page = self.daily_pages
+            from datetime import date as _d, timedelta as _td
+            end = _d(2026, 11, 13) - _td(days=200 * (page - 1))
+            candles = [{"timestamp": f"{(end - _td(days=i)).isoformat()}T00:00:00+09:00", "closePrice": str(1000 + page * 1000 + i)}
+                       for i in range(200)]
+            more = page < self.daily_page_limit
+            return {"result": {"candles": candles, "nextBefore": f"{(end - _td(days=200)).isoformat()}T00:00:00+09:00" if more else None}}
         if path == "/api/v1/candles":
             return {"result": {"candles": [
                 {"timestamp": "2026-11-13T00:00:00+09:00", "closePrice": "1233000"},
@@ -135,6 +154,15 @@ class RelayHTTPTest(unittest.TestCase):
         self.assertEqual(self.req(method="POST")[0].status, 405)
         self.assertEqual(self.req(method="DELETE")[0].status, 405)
 
+    def test_history_endpoint(self):
+        res, body = self.req(path="/v1/history?symbol=000660&kind=intraday")
+        self.assertEqual(res.status, 200)
+        j = json.loads(body)
+        self.assertEqual(j["values"][0], {"datetime": "2026-11-13 19:59:00", "close": 1233000})
+        for q in ("symbol=000660&kind=hack", "symbol=AAPL&kind=daily", "kind=daily", "symbol=000660%0A&kind=daily"):
+            self.assertEqual(self.req(path="/v1/history?" + q)[0].status, 400, q)
+        self.assertEqual(self.req(path="/v1/history?symbol=000660&kind=daily", headers={"X-Stockmap-Relay": "b" * 40})[0].status, 401)
+
     def test_preflight(self):
         res, _ = self.req(method="OPTIONS", headers={"X-Stockmap-Relay": None,
                                                      "Access-Control-Request-Private-Network": "true"})
@@ -161,6 +189,45 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(len([c for c in toss.calls if c[1] == "/oauth2/token"]), 1)  # 토큰 재사용
         self.assertEqual(len([c for c in toss.calls if c[1] == "/api/v1/candles"]), 1)  # 전일 종가는 캐시
         self.assertTrue(all(c[2] == "jwt1" for c in toss.calls if c[1] != "/oauth2/token"))
+
+    def test_daily_history_paging_and_cache(self):
+        toss, feed = self.make()
+        h = feed.history("000660", "daily")
+        self.assertTrue(h["ok"] and h["full"])
+        self.assertEqual(toss.daily_pages, 4)                 # 200개씩 4번 = 800일
+        self.assertEqual(len(h["values"]), 800)
+        self.assertEqual(h["values"][0]["datetime"], "2026-11-13")  # 최신순
+        self.assertTrue(all(c[3].get("adjusted") == "true" for c in toss.calls if c[3].get("count") == 200))
+        befores = [c[3].get("before") for c in toss.calls if c[3].get("count") == 200]
+        self.assertEqual(befores[0], None)
+        self.assertTrue(all(befores[1:]))                     # nextBefore로 이어 받기
+        feed.history("000660", "daily")
+        self.assertEqual(toss.daily_pages, 4)                 # 6시간 캐시
+
+    def test_daily_history_short_listing(self):
+        toss = FakeToss(daily_page_limit=2)
+        feed = r.TossPrices(call=toss, load_creds=keychain, log=lambda *a: None)
+        h = feed.history("000660", "daily")
+        self.assertEqual(toss.daily_pages, 2)
+        self.assertTrue(h["full"])                            # 상장일까지 다 받음 → '기간 부족' 판단 가능
+
+    def test_daily_adjusted_fallback(self):
+        toss = FakeToss(reject_adjusted=True)
+        feed = r.TossPrices(call=toss, load_creds=keychain, log=lambda *a: None)
+        h = feed.history("000660", "daily")
+        self.assertTrue(h["ok"])
+        self.assertEqual(len(h["values"]), 800)
+
+    def test_history_error_reported(self):
+        def call(method, path, **kw):
+            if path == "/oauth2/token":
+                return {"access_token": "jwt"}
+            e = r.RelayError("허용 IP 아님"); e.status, e.code = 403, "ip-not-allowed"
+            raise e
+        feed = r.TossPrices(call=call, load_creds=keychain, log=lambda *a: None)
+        h = feed.history("000660", "daily")
+        self.assertFalse(h["ok"])
+        self.assertEqual(h["values"], [])
 
     def test_toss_call_blocks_other_paths(self):
         for m, p in (("GET", "/api/v1/holdings"), ("GET", "/api/v1/accounts"), ("POST", "/api/v1/orders")):

@@ -447,7 +447,10 @@ with sync_playwright() as p:
     page = ctx.new_page()
     console = []
     page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
-    relay = {"calls": [], "mode": "ok"}
+    relay = {"calls": [], "hist": [], "mode": "ok"}
+    from urllib.parse import urlparse, parse_qs
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
     RT = "0123456789abcdef0123456789abcdef01234567"
     def relay_route(route):
         req = route.request
@@ -455,6 +458,19 @@ with sync_playwright() as p:
                 "Access-Control-Allow-Methods": "GET", "Content-Type": "application/json"}
         if req.method == "OPTIONS":
             route.fulfill(status=204, headers=cors); return
+        if "/v1/history" in req.url:
+            relay["hist"].append((req.url, req.headers.get("x-stockmap-relay")))
+            if relay["mode"] == "down":
+                route.abort(); return
+            q = parse_qs(urlparse(req.url).query)
+            now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+            if q.get("kind") == ["daily"]:
+                vals = [{"datetime": (now_kst - timedelta(days=i)).strftime("%Y-%m-%d"), "close": 1000000 + i * 1000} for i in range(900)]
+            else:
+                last = now_kst.replace(second=0, microsecond=0)
+                vals = [{"datetime": (last - timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"), "close": 1200000 if i == 60 else 1220000}
+                        for i in range(90)]
+            route.fulfill(status=200, headers=cors, body=json.dumps({"values": vals, "full": True, "ok": True, "status": ""})); return
         relay["calls"].append((req.url, req.headers.get("x-stockmap-relay"), req.headers.get("cookie")))
         if relay["mode"] == "down":
             route.abort(); return
@@ -484,13 +500,29 @@ with sync_playwright() as p:
     check("중계 가격 반영 (1,233,000 vs 전일 1,200,000 → +2.75%)", pct == "+2.75%", pct)
     check("중계 배지 '국내 실시간'", page.text_content("#relay") == "국내 실시간" and page.is_visible("#relay"), page.text_content("#relay"))
     check("이상한 중계 값은 무시(수동 가격 유지)", page.text_content(".leaf[data-symbol='005930'] .pct") == "수동 가격", page.text_content(".leaf[data-symbol='005930'] .pct"))
-    from urllib.parse import urlparse, parse_qs
     q = [parse_qs(urlparse(u).query) for u, _, _ in relay["calls"]]
     check("중계 요청엔 종목 코드만 (수량·평단 없음)", all(set(x) == {"symbols"} and x["symbols"] == ["000660,005930"] for x in q), str(q))
     check("중계 요청에 토큰 헤더, 쿠키 없음", all(t == RT and c is None for _, t, c in relay["calls"]), str([(t == RT, c) for _, t, c in relay["calls"]]))
     check("중계는 2초 간격", 1 <= len(relay["calls"]) <= 3, str(len(relay["calls"])))
-    page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(1200)
-    check("국내 종목 1주 등락은 '데이터 없음'", page.text_content(".leaf[data-symbol='000660'] .pct") == "데이터 없음", page.text_content(".leaf[data-symbol='000660'] .pct"))
+    check("'오늘'에서는 과거 가격 요청 안 함", not relay["hist"], str(relay["hist"]))
+    page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(1500)
+    exp = f"{(1233000 - 1007000) / 1007000 * 100:+.2f}%"
+    got = page.text_content(".leaf[data-symbol='000660'] .pct")
+    check("국내 종목 1주 등락 (중계 일봉, 한국 날짜 기준)", got == exp, f"{got} vs {exp}")
+    hq = [parse_qs(urlparse(u).query) for u, _ in relay["hist"]]
+    check("과거 가격 요청엔 종목 코드·종류만, 토큰 헤더 있음", hq and all(set(x) == {"symbol", "kind"} for x in hq) and all(t == RT for _, t in relay["hist"]), str(hq))
+    check("과거 가격은 중계 가격이 맞는 종목만 요청", {x["symbol"][0] for x in hq} <= {"000660", "005930"}, str(hq))
+    page.click(".period-btn[data-period='1y']"); page.wait_for_timeout(800)
+    n_daily = len([x for x in hq if x["kind"] == ["daily"]])
+    got = page.text_content(".leaf[data-symbol='000660'] .pct")
+    exp = f"{(1233000 - 1365000) / 1365000 * 100:+.2f}%"
+    check("1년 등락 (캐시 사용, 추가 요청 없음)", got == exp and len([u for u, _ in relay["hist"] if "daily" in u]) == n_daily, f"{got} vs {exp}")
+    page.hover(".leaf[data-symbol='000660']"); page.wait_for_timeout(200)
+    check("국내 종목 기준가에 '배당 제외' 표시 안 함", "배당 제외" not in page.inner_text("#tooltip") and "종가" in page.inner_text("#tooltip"), page.inner_text("#tooltip"))
+    page.mouse.move(5, 5)
+    page.click(".period-btn[data-period='1h']"); page.wait_for_timeout(1500)
+    got = page.text_content(".leaf[data-symbol='000660'] .pct")
+    check("국내 종목 1시간 등락 (중계 1분봉)", got == f"{(1233000 - 1200000) / 1200000 * 100:+.2f}%", got)
     page.click(".period-btn[data-period='day']"); page.wait_for_timeout(500)
     relay["mode"] = "auth"; page.wait_for_timeout(2500)
     check("토큰이 틀리면 '중계 토큰 오류'", page.text_content("#relay") == "중계 토큰 오류", page.text_content("#relay"))
