@@ -468,7 +468,7 @@ with sync_playwright() as p:
     page.route("http://127.0.0.1:18765/**", relay_route)
     page.goto(BASE)
     kr = [{"symbol": "000660", "currency": "KRW", "shares": 2, "avgPrice": 1000000, "group": "한국", "manualPrice": 1200000, "name": "SK하이닉스"},
-          {"symbol": "005930", "currency": "KRW", "shares": 1, "avgPrice": 60000, "group": "한국", "manualPrice": 70000}]
+          {"symbol": "005930", "currency": "KRW", "shares": 30, "avgPrice": 60000, "group": "한국", "manualPrice": 70000}]
     page.evaluate("h => localStorage.setItem('stockmap.v1', JSON.stringify({settings: {rememberHoldings: true}, holdings: h}))", kr)
     page.reload(); page.wait_for_timeout(2500)
     check("중계 토큰 없으면 127.0.0.1로 요청 안 함", not relay["calls"], str(relay["calls"]))
