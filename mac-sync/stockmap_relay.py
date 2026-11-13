@@ -40,7 +40,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from stockmap_sync import BASE, ERROR_HELP, OPENER, SyncError, _error_code, keychain_get, write_file_safely
+from stockmap_sync import BASE, ERROR_HELP, OPENER, SyncError, _error_code, load_credentials, write_file_safely
 
 KST = timezone(timedelta(hours=9))
 PORT = 18765
@@ -145,8 +145,8 @@ def prev_close_from_candles(candles, price_day):
 class TossPrices:
     """토스에서 가격을 받아 메모리에만 들고 있어요."""
 
-    def __init__(self, call=toss_call, read_keychain=keychain_get, log=print):
-        self.call, self.read_keychain, self.log = call, read_keychain, log
+    def __init__(self, call=toss_call, load_creds=load_credentials, log=print):
+        self.call, self.load_creds, self.log = call, load_creds, log
         self.lock = threading.Lock()
         self.token = None
         self.wanted = {}      # symbol -> 마지막으로 요청받은 시각
@@ -158,9 +158,13 @@ class TossPrices:
     def ensure_token(self):
         if self.token:
             return self.token
-        cid, secret = self.read_keychain("client_id"), self.read_keychain("client_secret")
-        if not cid or not secret:
+        try:
+            creds = self.load_creds()  # 키체인 허락 창 한 번
+        except SyncError as e:
+            raise RelayError(str(e))
+        if not creds:
             raise RelayError("키체인에 토스 키가 없어요. 'python3 stockmap_sync.py setup'을 먼저 하세요.")
+        cid, secret = creds
         j = self.call("POST", "/oauth2/token", form={
             "grant_type": "client_credentials", "client_id": cid, "client_secret": secret})
         secret = None  # 토큰을 받았으면 바로 버려요 (만료되면 키체인에서 다시 읽어요)

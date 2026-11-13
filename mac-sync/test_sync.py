@@ -52,7 +52,7 @@ def fake_server(calls):
 
 
 def fake_keychain(account):
-    return {"client_id": "tsck_live_test", "client_secret": "secret-xyz"}.get(account)
+    return {"credentials": '{"client_id":"tsck_live_test","client_secret":"secret-xyz"}'}.get(account)
 
 
 class SyncTest(unittest.TestCase):
@@ -163,6 +163,47 @@ class SyncTest(unittest.TestCase):
             code = s.main(["--out", "/tmp/x.json"])
         self.assertEqual(code, 1)
         self.assertIn("setup", out.getvalue())
+
+
+class CredentialsTest(unittest.TestCase):
+    def test_single_item_one_read(self):
+        reads = []
+        with mock.patch.object(s, "keychain_get", lambda a: reads.append(a) or fake_keychain(a)):
+            self.assertEqual(s.load_credentials(), ("tsck_live_test", "secret-xyz"))
+        self.assertEqual(reads, ["credentials"])  # 허락 창 한 번
+
+    def test_migrates_old_two_items(self):
+        old = {"client_id": "cid-old", "client_secret": "sec-old"}
+        saved, deleted = {}, []
+        with mock.patch.object(s, "keychain_get", lambda a: old.get(a)), \
+             mock.patch.object(s, "keychain_set", lambda a, v, l: saved.update({a: v}) or True), \
+             mock.patch.object(s, "keychain_delete", deleted.append), \
+             mock.patch("sys.stdout", new_callable=io.StringIO):
+            self.assertEqual(s.load_credentials(), ("cid-old", "sec-old"))
+        self.assertEqual(s.parse_credentials(saved["credentials"]), ("cid-old", "sec-old"))
+        self.assertEqual(sorted(deleted), ["client_id", "client_secret"])
+
+    def test_old_items_kept_if_save_fails(self):
+        old = {"client_id": "cid-old", "client_secret": "sec-old"}
+        deleted = []
+        with mock.patch.object(s, "keychain_get", lambda a: old.get(a)), \
+             mock.patch.object(s, "keychain_set", lambda a, v, l: False), \
+             mock.patch.object(s, "keychain_delete", deleted.append):
+            self.assertEqual(s.load_credentials(), ("cid-old", "sec-old"))
+        self.assertEqual(deleted, [])
+
+    def test_broken_item_rejected(self):
+        with mock.patch.object(s, "keychain_get", lambda a: "not json" if a == "credentials" else None):
+            with self.assertRaises(s.SyncError):
+                s.load_credentials()
+
+    def test_keychain_set_uses_empty_acl(self):
+        cmds = []
+        with mock.patch.object(s.subprocess, "run", lambda cmd, **kw: cmds.append(cmd) or mock.Mock(returncode=0)):
+            s.keychain_set("credentials", "v", "label")
+        cmd = cmds[0]
+        self.assertEqual(cmd[cmd.index("-T") + 1], "")   # 허용 앱 목록 비움 → 읽을 때마다 허락 창
+        self.assertEqual(cmd[-2:], ["-w", "v"])
 
 
 if __name__ == "__main__":

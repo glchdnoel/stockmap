@@ -50,15 +50,15 @@ class FakeToss:
         raise AssertionError("예상 못 한 호출 " + path)
 
 
-def keychain(account):
-    return {"client_id": "cid", "client_secret": "csecret"}[account]
+def keychain():
+    return "cid", "csecret"
 
 
 class RelayHTTPTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.toss = FakeToss()
-        cls.feed = r.TossPrices(call=cls.toss, read_keychain=keychain, log=lambda *a: None)
+        cls.feed = r.TossPrices(call=cls.toss, load_creds=keychain, log=lambda *a: None)
         cls.srv = r.make_server(cls.feed, TOKEN, {ORIGIN}, port=0)
         cls.port = cls.srv.server_address[1]
         r.ALLOWED_HOSTS.update({f"127.0.0.1:{cls.port}", f"localhost:{cls.port}"})
@@ -149,7 +149,7 @@ class RelayHTTPTest(unittest.TestCase):
 class FeedTest(unittest.TestCase):
     def make(self):
         toss = FakeToss()
-        return toss, r.TossPrices(call=toss, read_keychain=keychain, log=lambda *a: None)
+        return toss, r.TossPrices(call=toss, load_creds=keychain, log=lambda *a: None)
 
     def test_only_allowed_toss_calls(self):
         toss, feed = self.make()
@@ -214,13 +214,13 @@ class FeedTest(unittest.TestCase):
                                    {"symbol": "005930", "lastPrice": "<script>"},
                                    {"symbol": "035720", "lastPrice": "100", "currency": "USD"}]}
             return {"result": {"candles": []}}
-        feed = r.TossPrices(call=call, read_keychain=keychain, log=lambda *a: None)
+        feed = r.TossPrices(call=call, load_creds=keychain, log=lambda *a: None)
         feed.want(["000660", "005930", "035720"])
         feed.poll_once()
         self.assertEqual(feed.snapshot(["000660", "005930", "035720"])["prices"], [])
 
     def test_missing_keys(self):
-        feed = r.TossPrices(call=FakeToss(), read_keychain=lambda a: None, log=lambda *a: None)
+        feed = r.TossPrices(call=FakeToss(), load_creds=lambda: None, log=lambda *a: None)
         with self.assertRaises(r.RelayError) as cm:
             feed.ensure_token()
         self.assertIn("setup", str(cm.exception))

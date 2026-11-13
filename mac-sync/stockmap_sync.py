@@ -5,7 +5,7 @@
 안전 장치
   1. 조회 전용: 토큰 발급, 계좌 목록, 보유 종목 3가지 호출만 허용해요.
      나머지(주문 등)는 코드 안에서 차단되고, 주문 기능 코드는 아예 없어요.
-  2. client_secret은 macOS 키체인에만 저장해요. 파일·명령어 기록에 남지 않아요.
+  2. client_secret은 macOS 키체인에만 저장해요(client_id와 한 항목에 같이). 파일·명령어 기록에 남지 않아요.
   3. 파이썬 기본 기능만 써요 (외부 패키지 설치 없음).
   4. 계좌번호는 화면에도, 결과 파일에도 쓰지 않아요.
   5. 다른 주소로 넘기는 리다이렉트는 따라가지 않아요 (토큰 유출 방지).
@@ -16,6 +16,7 @@
   python3 stockmap_sync.py forget   # 키체인에서 키 삭제
 """
 import argparse
+import getpass
 import json
 import os
 import re
@@ -32,6 +33,8 @@ from pathlib import Path
 
 BASE = "https://openapi.tossinvest.com"
 KEYCHAIN_SERVICE = "stockmap-tossinvest"
+CRED_ACCOUNT = "credentials"   # client_id와 client_secret을 한 항목에 같이 (허락 창이 한 번만 떠요)
+OLD_ACCOUNTS = ("client_id", "client_secret")  # 예전 방식 (두 항목 → 허락 창 두 번)
 SECURITY_BIN = "/usr/bin/security"
 # 이 프로그램이 부를 수 있는 호출은 이 세 개뿐이에요.
 ALLOWED = {
@@ -64,14 +67,48 @@ def keychain_get(account):
     return value or None
 
 
-def keychain_set_interactive(account, label):
-    print(f"\n{label}을(를) 붙여넣고 Enter를 누르세요. 화면에는 보이지 않아요. (확인을 위해 두 번 물어봐요)")
-    # -w를 마지막에 두면 security가 직접 입력을 받아요. 비밀값이 이 프로그램이나 명령어 기록을 거치지 않아요.
-    # -T "": 허용 앱 목록을 비워서, 어떤 프로그램이든 키를 읽을 때마다 맥이 허락을 물어요.
+def keychain_set(account, value, label):
+    """값을 키체인에 저장해요. -T "": 허용 앱 목록을 비워서, 어떤 프로그램이든 읽을 때마다 맥이 허락을 물어요.
+    값은 security 명령의 인자로 잠깐 넘어가요(이 맥의 내 계정 프로그램만 볼 수 있고, 명령어 기록에는 남지 않아요)."""
     r = subprocess.run([SECURITY_BIN, "add-generic-password", "-U", "-T", "", "-s", KEYCHAIN_SERVICE,
-                        "-a", account, "-l", f"StockMap 토스증권 {label}", "-w"])
-    if r.returncode != 0:
-        raise SyncError("키체인에 저장하지 못했어요.")
+                        "-a", account, "-l", label, "-w", value], capture_output=True)
+    return r.returncode == 0
+
+
+def parse_credentials(raw):
+    try:
+        j = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(j, dict):
+        return None
+    cid, secret = j.get("client_id"), j.get("client_secret")
+    if isinstance(cid, str) and isinstance(secret, str) and cid and secret:
+        return cid, secret
+    return None
+
+
+def credentials_value(cid, secret):
+    return json.dumps({"client_id": cid, "client_secret": secret}, separators=(",", ":"))
+
+
+def load_credentials():
+    """(client_id, client_secret) 또는 None. 키체인 허락 창은 한 번만 떠요.
+    예전 방식(두 항목)으로 저장돼 있으면 한 번 합쳐서 저장하고 예전 항목은 지워요."""
+    raw = keychain_get(CRED_ACCOUNT)
+    if raw:
+        creds = parse_credentials(raw)
+        if not creds:
+            raise SyncError("키체인의 토스 키 형식이 이상해요. 'python3 stockmap_sync.py setup'으로 다시 저장하세요.")
+        return creds
+    cid, secret = keychain_get("client_id"), keychain_get("client_secret")
+    if not cid or not secret:
+        return None
+    if keychain_set(CRED_ACCOUNT, credentials_value(cid, secret), "StockMap 토스증권 키"):
+        for a in OLD_ACCOUNTS:
+            keychain_delete(a)
+        print("키체인의 토스 키 두 항목을 하나로 합쳤어요. 다음부터는 허락 창이 한 번만 떠요.")
+    return cid, secret
 
 
 def keychain_delete(account):
@@ -286,22 +323,32 @@ def write_output(holdings, out_path):
 # ---------------------------------------------------------------------------
 def cmd_setup():
     print("토스증권 웹(WTS) → 설정 → Open API에서 client_id와 client_secret을 복사해 두세요.")
-    keychain_set_interactive("client_id", "client_id")
-    keychain_set_interactive("client_secret", "client_secret")
+    print("붙여넣어도 화면에는 보이지 않아요.\n")
+    cid = getpass.getpass("client_id: ").strip()
+    secret = getpass.getpass("client_secret: ").strip()
+    again = getpass.getpass("client_secret 한 번 더: ").strip()
+    if not cid or not secret:
+        raise SyncError("비어 있어서 저장하지 않았어요.")
+    if secret != again:
+        raise SyncError("두 번 입력한 client_secret이 달라서 저장하지 않았어요.")
+    if not keychain_set(CRED_ACCOUNT, credentials_value(cid, secret), "StockMap 토스증권 키"):
+        raise SyncError("키체인에 저장하지 못했어요.")
+    for a in OLD_ACCOUNTS:
+        keychain_delete(a)
     print("\n키체인에 저장했어요. 이제 'python3 stockmap_sync.py'로 실행하세요.")
 
 
 def cmd_forget():
-    keychain_delete("client_id")
-    keychain_delete("client_secret")
+    for a in (CRED_ACCOUNT,) + OLD_ACCOUNTS:
+        keychain_delete(a)
     print("키체인에서 토스증권 키를 지웠어요.")
 
 
 def cmd_sync(out_path):
-    client_id = keychain_get("client_id")
-    client_secret = keychain_get("client_secret")
-    if not client_id or not client_secret:
+    creds = load_credentials()
+    if not creds:
         raise SyncError("저장된 키가 없어요. 먼저 'python3 stockmap_sync.py setup'을 실행하세요.")
+    client_id, client_secret = creds
 
     print("1/3 토큰 받는 중…")
     tok = call("POST", "/oauth2/token", form={
