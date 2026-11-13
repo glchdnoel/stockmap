@@ -12,7 +12,7 @@
        - Host: 127.0.0.1 또는 localhost로 온 요청만 (DNS 리바인딩 공격 차단)
        - Origin: 스톡맵 주소에서 온 요청만 (다른 웹사이트가 몰래 부르는 것 차단)
        - 중계 토큰: 웹앱 설정에 넣은 비밀 토큰이 맞는지
-  4. 토스에 보내는 호출은 토큰 발급, 현재가, 캔들(전일 종가·기간별 등락용) 세 개뿐이에요.
+  4. 토스에 보내는 호출은 토큰 발급, 현재가·캔들, 코스피 지수, 계좌 목록·보유 종목(조회)뿐이에요.
      계좌·주문 호출은 코드에 없고, 다른 호출은 보내기 전에 막아요.
   5. 아무도 시세를 요청하지 않으면 30초 뒤 토스 호출을 멈춰요.
 
@@ -40,7 +40,8 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from stockmap_sync import BASE, ERROR_HELP, OPENER, SyncError, _error_code, load_credentials, write_file_safely
+from stockmap_sync import (BASE, ERROR_HELP, MAX_HOLDINGS as SYNC_MAX_HOLDINGS, OPENER, SyncError, _error_code,
+                           build_holdings, load_credentials, load_groups, write_file_safely)
 
 KST = timezone(timedelta(hours=9))
 PORT = 18765
@@ -59,7 +60,17 @@ DAILY_CACHE = 6 * 60 * 60     # 일봉은 6시간마다 새로
 INTRADAY_COUNT = 90           # 1분봉 90개 (1시간 등락용)
 INTRADAY_CACHE = 60
 MAX_RESPONSE = 500_000
-TOSS_ALLOWED = {("POST", "/oauth2/token"), ("GET", "/api/v1/prices"), ("GET", "/api/v1/candles")}
+TOSS_ALLOWED = {
+    ("POST", "/oauth2/token"),
+    ("GET", "/api/v1/prices"),                                # 현재가
+    ("GET", "/api/v1/candles"),                               # 캔들 (전일 종가·기간별 등락)
+    ("GET", "/api/v1/market-indicators/prices"),              # 코스피 지수
+    ("GET", "/api/v1/market-indicators/KOSPI/candles"),       # 코스피 전일 종가
+    ("GET", "/api/v1/accounts"),                              # 계좌 목록 (보유 종목 자동 받기)
+    ("GET", "/api/v1/holdings"),                              # 보유 종목
+}
+INDEX_SYMBOL = "KOSPI"
+HOLDINGS_CACHE = 60
 HISTORY_KINDS = {"daily", "intraday"}
 
 
@@ -86,7 +97,7 @@ def load_or_create_token(force_new=False):
 # ---------------------------------------------------------------------------
 # 토스 호출 (허용된 세 개만, 리다이렉트 금지)
 # ---------------------------------------------------------------------------
-def toss_call(method, path, *, token=None, form=None, query=None):
+def toss_call(method, path, *, token=None, form=None, query=None, account_seq=None):
     if (method, path) not in TOSS_ALLOWED:
         raise RelayError(f"허용되지 않은 호출이라 막았어요: {method} {path}")
     url = BASE + path + ("?" + urllib.parse.urlencode(query) if query else "")
@@ -97,6 +108,8 @@ def toss_call(method, path, *, token=None, form=None, query=None):
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     if token:
         headers["Authorization"] = "Bearer " + token
+    if account_seq is not None:
+        headers["X-Tossinvest-Account"] = str(int(account_seq))
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with OPENER.open(req, timeout=10) as res:
@@ -160,6 +173,10 @@ class TossPrices:
         self.fetched_at = None
         self.hist = {}        # (symbol, kind) -> {"values", "full", "at"}
         self.hist_lock = threading.Lock()
+        self.last_seen = 0.0  # 웹앱이 마지막으로 시세를 요청한 시각 (지수도 이때만 받아요)
+        self.index = {}       # "KOSPI" -> {"price", "at", "prevClose", "prevDay", "prevFetched"}
+        self.holdings_cache = None
+        self.holdings_lock = threading.Lock()
 
     def ensure_token(self):
         if self.token:
@@ -180,11 +197,13 @@ class TossPrices:
         self.token = tok
         return tok
 
-    def _call_with_token(self, method, path, query):
+    def _call_with_token(self, method, path, query=None, account_seq=None):
         for attempt in range(2):
             tok = self.ensure_token()
             try:
-                return self.call(method, path, token=tok, query=query)
+                if account_seq is None:
+                    return self.call(method, path, token=tok, query=query)
+                return self.call(method, path, token=tok, query=query, account_seq=account_seq)
             except RelayError as e:
                 expired = getattr(e, "status", None) == 401 or getattr(e, "code", None) in ("expired-token", "token-revoked")
                 if expired and attempt == 0:
@@ -195,6 +214,7 @@ class TossPrices:
     def want(self, symbols):
         now = time.time()
         with self.lock:
+            self.last_seen = now
             for s in symbols:
                 self.wanted[s] = now
             # 오래 안 찾은 종목은 목록에서 빼요
@@ -238,10 +258,77 @@ class TossPrices:
         with self.lock:
             self.prev[symbol] = {"close": close, "day": day, "fetched": time.time()}
 
+    def refresh_index(self):
+        """코스피 지수. 실패해도 종목 시세에는 영향 없어요."""
+        try:
+            j = self._call_with_token("GET", "/api/v1/market-indicators/prices", {"symbols": INDEX_SYMBOL})
+            rows = j.get("result") if isinstance(j, dict) else None
+            row = next((r for r in rows if isinstance(r, dict) and r.get("symbol") == INDEX_SYMBOL), None) if isinstance(rows, list) else None
+            price = num(row.get("lastPrice")) if row else None
+            if not price:
+                return
+            t = parse_time(row.get("timestamp"))
+            day = (t or datetime.now(KST)).astimezone(KST).date()
+            with self.lock:
+                old = dict(self.index.get(INDEX_SYMBOL) or {})
+            if not (old.get("prevDay") == day and time.time() - old.get("prevFetched", 0) < PREV_CLOSE_REFRESH):
+                c = self._call_with_token("GET", f"/api/v1/market-indicators/{INDEX_SYMBOL}/candles", {"interval": "1d", "count": 5})
+                body = c.get("result", c) if isinstance(c, dict) else None
+                candles = body.get("candles") if isinstance(body, dict) else None
+                old.update(prevClose=prev_close_from_candles(candles if isinstance(candles, list) else [], day),
+                           prevDay=day, prevFetched=time.time())
+            old.update(price=price, at=t.isoformat() if t else None)
+            with self.lock:
+                self.index[INDEX_SYMBOL] = old
+        except RelayError:
+            pass
+
+    def holdings(self):
+        """토스 보유 종목 (동기화 프로그램과 같은 변환). 계좌번호는 넘기지 않아요. 1분 캐시."""
+        with self.holdings_lock:
+            c = self.holdings_cache
+            if c and time.time() - c["at"] < HOLDINGS_CACHE:
+                return c["data"]
+            try:
+                acc = self._call_with_token("GET", "/api/v1/accounts")
+                accounts = acc.get("result") if isinstance(acc, dict) else None
+                if not isinstance(accounts, list):
+                    raise RelayError("계좌 목록 응답 형식이 올바르지 않아요.")
+                items = []
+                for i, a in enumerate(accounts[:10]):
+                    try:
+                        seq = int(a.get("accountSeq")) if isinstance(a, dict) else None
+                    except (TypeError, ValueError):
+                        seq = None
+                    if seq is None:
+                        continue
+                    if i:
+                        time.sleep(1.1)  # 계좌 호출 한도 여유
+                    h = self._call_with_token("GET", "/api/v1/holdings", account_seq=seq)
+                    result = h.get("result") if isinstance(h, dict) else None
+                    got = result.get("items") if isinstance(result, dict) else None
+                    if isinstance(got, list):
+                        items.extend(got)
+                holdings, _skipped = build_holdings(items, load_groups())
+                data = {"holdings": holdings[:min(MAX_SYMBOLS, SYNC_MAX_HOLDINGS)], "ok": True, "status": "",
+                        "fetchedAt": datetime.now(KST).isoformat(timespec="seconds")}
+            except RelayError as e:
+                if c:
+                    return dict(c["data"], ok=False, status=str(e))
+                return {"holdings": [], "ok": False, "status": str(e), "fetchedAt": None}
+            self.holdings_cache = {"data": data, "at": time.time()}
+            return data
+
     def poll_once(self):
         symbols = self.active_symbols()
-        if not symbols:
+        with self.lock:
+            active = time.time() - self.last_seen <= IDLE_SECONDS
+        if not active:
             self.status = "대기 중 (웹앱 요청 없음)"
+            return
+        self.refresh_index()
+        if not symbols:
+            self.status = "받는 중"
             return
         try:
             self.refresh_prices(symbols)
@@ -331,7 +418,10 @@ class TossPrices:
                 pc = self.prev.get(s)
                 out.append({"symbol": s, "price": p["price"], "at": p["at"],
                             "prevClose": pc["close"] if pc else None})
-            return {"prices": out, "fetchedAt": self.fetched_at,
+            ix = self.index.get(INDEX_SYMBOL)
+            indices = [{"symbol": INDEX_SYMBOL, "price": ix["price"], "at": ix.get("at"), "prevClose": ix.get("prevClose")}] \
+                if ix and ix.get("price") else []
+            return {"prices": out, "indices": indices, "fetchedAt": self.fetched_at,
                     "ok": self.status == "받는 중", "status": self.status if self.status != "받는 중" else ""}
 
 
@@ -395,12 +485,14 @@ def make_handler(feed, relay_token, origins):
             qs = urllib.parse.parse_qs(u.query)
             if u.path == "/v1/prices":
                 raw = qs.get("symbols", [""])[0]
-                symbols = [s for s in raw.split(",") if s][:MAX_SYMBOLS + 1]
-                if not symbols or len(symbols) > MAX_SYMBOLS or not all(SYMBOL_RE.fullmatch(s) for s in symbols):
+                symbols = [s for s in raw.split(",") if s][:MAX_SYMBOLS + 1]  # 비어 있어도 돼요 (코스피 지수만)
+                if len(symbols) > MAX_SYMBOLS or not all(SYMBOL_RE.fullmatch(s) for s in symbols):
                     self._reject(400, "종목 코드 형식 오류")
                     return
                 feed.want(symbols)
                 data = feed.snapshot(symbols)
+            elif u.path == "/v1/holdings":
+                data = feed.holdings()
             elif u.path == "/v1/history":
                 symbol, kind = qs.get("symbol", [""])[0], qs.get("kind", [""])[0]
                 if not SYMBOL_RE.fullmatch(symbol) or kind not in HISTORY_KINDS:

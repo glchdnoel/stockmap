@@ -39,6 +39,8 @@
       <button type="button" class="period-btn" data-period="3y">3년</button>
     </div>
     <div class="spacer"></div>
+    <span id="fxPill" class="pill fx">USD/KRW —</span>
+    <span id="kospiPill" class="pill">코스피 —</span>
     <button id="manageBtn" class="btn" type="button">종목 관리</button>
     <button id="settingsBtn" class="btn" type="button">설정</button>
     </div>
@@ -121,6 +123,8 @@
         <button class="btn primary" type="submit">저장</button>
         <button id="deleteRelayBtn" class="btn danger" type="button">삭제</button>
       </form>
+      <label class="row"><input id="fAutoHoldings" type="checkbox"> 맥 중계에서 보유 종목 자동으로 받기</label>
+      <p class="muted small">켜면 토스 보유 종목·수량·평단을 5분마다 받아서 종목 목록을 바꿔요(계좌번호는 오지 않아요). 종목 관리에서 직접 넣은 종목은 토스 종목으로 바뀌어요. 동기화·가져오기(JSON)가 필요 없어요.</p>
     </section>
     <section class="setting">
       <h3>표시</h3>

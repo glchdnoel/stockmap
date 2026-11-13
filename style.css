@@ -23,6 +23,14 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 #today { display: inline-block; min-width: 13em; white-space: nowrap; }
 #periodLabel { display: inline-block; min-width: 2.6em; }
 #updated, #fxInfo { white-space: nowrap; }
+/* 환율·코스피: 눈에 띄게. 글자 길이가 바뀌어도 자리가 그대로이도록 폭을 잡아 둬요 */
+.pill { padding: 4px 10px; border-radius: 8px; background: #222733; color: var(--muted); font-weight: 700; font-size: 13px;
+  white-space: nowrap; font-variant-numeric: tabular-nums; text-align: center; }
+.pill.fx { background: rgba(76,141,255,.16); color: #8fb8ff; min-width: 11em; }
+.pill.fx.manual { background: rgba(229,166,72,.15); color: #e5a648; }
+#kospiPill { min-width: 13.5em; }
+#kospiPill.up { background: rgba(47,191,91,.15); color: var(--up); }
+#kospiPill.down { background: rgba(229,72,77,.15); color: var(--down); }
 #fxInfo { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .brand { font-weight: 700; font-size: 14px; }
 .logo { color: var(--accent); }
@@ -115,7 +123,7 @@ input[type=checkbox] { width: 16px; height: 16px; }
   .topbar { gap: 6px; padding: 6px 10px; }
   .bar-row { gap: 6px 8px; }
   .bar-status { flex-wrap: wrap; }
-  #total, #today { min-width: 0; }
+  #total, #today, .pill.fx, #kospiPill { min-width: 0; }
   #updated { display: none; }
   /* 핸드폰: 누르는 곳은 최소 44×44px */
   .btn, .icon-btn, .period-btn { min-height: 44px; min-width: 44px; }

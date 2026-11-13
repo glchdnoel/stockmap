@@ -50,6 +50,8 @@
   const RELAY_BASE = 'http://127.0.0.1:18765';
   const RELAY_URL = RELAY_BASE + '/v1/prices';
   const RELAY_HIST_URL = RELAY_BASE + '/v1/history';
+  const RELAY_HOLDINGS_URL = RELAY_BASE + '/v1/holdings';
+  const RELAY_HOLDINGS_EVERY = 5 * 60 * 1000; // 보유 종목은 5분마다 (사고팔면 몇 분 안에 반영)
   const RELAY_HIST_TIMEOUT = 20000; // 일봉은 중계가 토스에서 4번 나눠 받아요
   const RELAY_KEY_KEY = 'stockmap.relaytoken';
   const RELAY_TOKEN_RE = /^[0-9a-f]{40}$/;
@@ -61,7 +63,7 @@
   const $ = (id) => document.getElementById(id);
   const ui = {
     map: $('map'), total: $('total'), today: $('today'), market: $('market'), conn: $('conn'),
-    updated: $('updated'), relay: $('relay'), fxInfo: $('fxInfo'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
+    updated: $('updated'), relay: $('relay'), fxPill: $('fxPill'), kospiPill: $('kospiPill'), fxInfo: $('fxInfo'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
     manageDlg: $('manageDlg'), settingsDlg: $('settingsDlg'), addForm: $('addForm'),
     formMsg: $('formMsg'), holdingsBody: $('holdingsBody'), importFile: $('importFile'),
     keyForm: $('keyForm'), fKey: $('fKey'), keyStatus: $('keyStatus'), settingsMsg: $('settingsMsg'),
@@ -108,7 +110,7 @@
     return { symbol, currency: raw.currency, shares, avgPrice, group, manualPrice, name };
   }
   function validateSettings(raw) {
-    const s = { fxRate: 1400, fxAuto: true, fxLast: null, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true, rememberHoldings: false };
+    const s = { fxRate: 1400, fxAuto: true, fxLast: null, range: 3, masked: false, demo: false, period: 'day', rememberKeys: true, rememberHoldings: false, autoHoldings: true };
     if (!raw || typeof raw !== 'object') return s;
     try { s.fxRate = toNumber(raw.fxRate, { min: 1, max: 100000 }); } catch (e) { /* 기본값 */ }
     s.fxAuto = raw.fxAuto !== false; // 기본값: 자동
@@ -126,6 +128,7 @@
     s.demo = raw.demo === true;
     s.rememberKeys = raw.rememberKeys !== false;
     s.rememberHoldings = raw.rememberHoldings === true; // 기본값: 기억하지 않음
+    s.autoHoldings = raw.autoHoldings !== false;        // 기본값: 맥 중계에서 보유 종목 자동으로 받기
     if (Object.prototype.hasOwnProperty.call(PERIODS, raw.period)) s.period = raw.period;
     return s;
   }
@@ -146,7 +149,8 @@
     intraday: new Map(),  // symbol -> { fetchedAt, bars: [[분 단위 시각, close, 'MM/DD HH:MM'], ...] (최신순) }
     histUnsupported: new Set(),
     demoBases: {},
-    relay: { timer: null, status: 'off', fails: 0, gen: 0, histTimer: null }, // 맥 중계 상태
+    relay: { timer: null, status: 'off', fails: 0, gen: 0, histTimer: null, holdingsAt: 0, holdingsBusy: false }, // 맥 중계 상태
+    index: null,             // 코스피 { price, prevClose, at } (맥 중계)
     fx: { status: 'idle', rate: null, at: null, reason: '' }, // 이번에 연 앱에서 자동으로 받은 환율
   };
 
@@ -235,6 +239,7 @@
   // 국내(KRW) 종목은 숫자 코드 대신 종목명, 이름이 없으면 코드. 미국 종목은 티커.
   function displayName(h) { return h.currency === 'KRW' ? (h.name || h.symbol) : h.symbol; }
   const nfFx = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 2 });
+  const nfIdx = new Intl.NumberFormat('ko-KR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const fxTimeFmt = new Intl.DateTimeFormat('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   function fxLabel() {
     const f = currentFx();
@@ -472,6 +477,16 @@
     ui.today.classList.toggle('down', pct < 0);
     ui.updated.textContent = '업데이트 ' + new Date().toLocaleTimeString('ko-KR');
     ui.fxInfo.textContent = fxLabel();
+    const f = currentFx();
+    ui.fxPill.textContent = 'USD/KRW ' + nfFx.format(f.rate) + '원';
+    ui.fxPill.classList.toggle('manual', f.source !== 'auto');
+    ui.fxPill.title = fxLabel();
+    const ix = state.index;
+    const ipct = ix && ix.prevClose ? ((ix.price - ix.prevClose) / ix.prevClose) * 100 : NaN;
+    ui.kospiPill.textContent = ix ? `코스피 ${nfIdx.format(ix.price)} ${fmtPct(ipct)}` : '코스피 —';
+    ui.kospiPill.classList.toggle('up', ipct > 0);
+    ui.kospiPill.classList.toggle('down', ipct < 0);
+    ui.kospiPill.title = ix ? '코스피 · 맥 중계(토스증권)' : '맥 중계를 켜면 코스피 지수가 나와요';
     ui.fxInfo.classList.toggle('fx-manual', currentFx().source !== 'auto');
   }
   function renderNow() {
@@ -741,20 +756,59 @@
       if (!prev || prev.price !== price || prev.prevClose !== prevClose) changed = true;
       state.quotes.set(p.symbol, { supported: true, price, prevClose, lastTrade: Date.now(), source: 'relay' });
     }
+    // 코스피 지수
+    const ix = Array.isArray(j.indices) ? j.indices.find((x) => x && x.symbol === 'KOSPI') : null;
+    const ip = ix ? Number(ix.price) : NaN;
+    const ipc = ix && ix.prevClose != null ? Number(ix.prevClose) : NaN;
+    state.index = Number.isFinite(ip) && ip > 0 && ip < 1e6
+      ? { price: ip, prevClose: Number.isFinite(ipc) && ipc > 0 && ipc < 1e6 ? ipc : null }
+      : null;
+    scheduleRender(false);
     if (changed) { state.layoutDirty = true; scheduleRender(false); }
+  }
+  // 보유 종목 자동으로 받기: 맥 중계가 토스에서 받은 종목·수량·평단 (계좌번호는 오지 않아요)
+  async function relaySyncHoldings(runId, force) {
+    const token = getRelayToken();
+    if (!token || !state.settings.autoHoldings || state.settings.demo || state.relay.holdingsBusy) return;
+    if (!force && state.relay.holdingsAt && Date.now() - state.relay.holdingsAt < RELAY_HOLDINGS_EVERY) return;
+    state.relay.holdingsBusy = true;
+    try {
+      const j = await relayGet(token, new URL(RELAY_HOLDINGS_URL), RELAY_HIST_TIMEOUT);
+      if (runId !== state.runId || !j.ok || !Array.isArray(j.holdings)) return;
+      const next = []; const seen = new Set();
+      for (const raw of j.holdings.slice(0, MAX_HOLDINGS)) {
+        try {
+          const h = validateHolding(raw);
+          if (!seen.has(h.symbol)) { seen.add(h.symbol); next.push(h); }
+        } catch (e) { /* 형식이 이상한 종목은 버려요 */ }
+      }
+      state.relay.holdingsAt = Date.now();
+      if (!next.length) return;
+      const shape = (list) => JSON.stringify(list.map((h) => [h.symbol, h.currency, h.shares, h.avgPrice, h.group, h.name]).sort());
+      const changedList = shape(next) !== shape(state.holdings);
+      state.holdings = next;
+      saveState();
+      if (changedList) restart(); // 종목이 바뀌면 시세 구독을 다시 해요
+      else scheduleRender(false);  // 수동 가격(토스 현재가)만 바뀜
+    } catch (e) {
+      /* 중계가 꺼져 있으면 다음에 다시 */
+    } finally {
+      state.relay.holdingsBusy = false;
+    }
   }
   async function relayTick(runId, gen) {
     const stale = () => runId !== state.runId || gen !== state.relay.gen; // 다시 시작했으면 예전 반복은 멈춰요
     if (stale()) return;
     const token = getRelayToken();
-    const symbols = relaySymbols();
-    if (!token || !symbols.length) { setRelayBadge('off'); return; }
+    const symbols = relaySymbols(); // 국내 종목이 없어도 코스피·보유 종목 때문에 연결해요
+    if (!token) { setRelayBadge('off'); return; }
     if (!document.hidden) { // 탭을 안 보고 있으면 쉬어요 (토스 호출도 같이 멈춰요)
       try {
         const j = await fetchRelay(token, symbols);
         if (stale()) return;
         applyRelay(j, symbols);
         state.relay.fails = 0;
+        relaySyncHoldings(runId, false);
         // 중계가 (다시) 연결되면, 못 받은 과거 가격을 이어서 받아요
         if (state.relay.status !== 'live' && state.settings.period !== 'day') requestKrHistory(runId, state.settings.period);
         if (j.ok) setRelayBadge('live', j.fetchedAt ? '맥 중계 · ' + String(j.fetchedAt).slice(11, 19) + ' 기준' : '');
@@ -762,6 +816,7 @@
       } catch (e) {
         if (stale()) return;
         state.relay.fails++;
+        if (state.relay.fails >= 2 && state.index) { state.index = null; scheduleRender(false); } // 오래된 지수는 숨겨요
         if (e.auth) setRelayBadge('auth', '설정에서 중계 토큰을 다시 넣어 주세요.');
         else setRelayBadge(state.relay.fails >= 2 ? 'down' : 'wait', '맥에서 python3 stockmap_relay.py 를 실행하세요.');
       }
@@ -774,12 +829,13 @@
     clearTimeout(state.relay.timer);
     state.relay.gen++;
     state.relay.fails = 0;
-    if (!getRelayToken() || !relaySymbols().length) { setRelayBadge('off'); return; }
+    if (!getRelayToken()) { setRelayBadge('off'); return; }
     setRelayBadge('wait');
     relayTick(runId, state.relay.gen);
   }
   function stopRelay() {
     state.relay.gen++;
+    state.index = null;
     clearTimeout(state.relay.timer);
     clearInterval(state.relay.histTimer);
     state.relay.timer = null;
@@ -1064,7 +1120,15 @@
     clearInterval(td.intradayTimer);
     showBanner('');
     state.mode = state.settings.demo || state.holdings.length === 0 ? 'demo' : 'live';
-    if (state.mode === 'demo') { startDemo(runId); return; }
+    if (state.mode === 'demo') {
+      startDemo(runId);
+      // 보유 종목이 비어 있으면 맥 중계에서 받아 와요 (중계가 켜질 때까지 10초마다)
+      if (!state.settings.demo && getRelayToken() && state.settings.autoHoldings) {
+        relaySyncHoldings(runId, true);
+        state.timers.push(setInterval(() => { if (runId === state.runId && !document.hidden) relaySyncHoldings(runId, true); }, 10000));
+      }
+      return;
+    }
 
     startRelay(runId); // 국내 종목은 Finnhub 키와 상관없이 맥 중계로 받아요
     const key = getApiKey();
@@ -1220,6 +1284,7 @@
     $('fDemo').checked = state.settings.demo;
     $('fRemember').checked = state.settings.rememberKeys;
     $('fRememberHoldings').checked = state.settings.rememberHoldings;
+    $('fAutoHoldings').checked = state.settings.autoHoldings;
     ui.fKey.value = '';
     ui.settingsMsg.textContent = '';
     renderKeyStatus();
@@ -1265,6 +1330,9 @@
         if (rt) writeKey(RELAY_KEY_KEY, rt);
       }
       state.settings.rememberHoldings = $('fRememberHoldings').checked;
+      const auto = $('fAutoHoldings').checked;
+      if (auto && !state.settings.autoHoldings) state.relay.holdingsAt = 0; // 켜면 바로 받아요
+      state.settings.autoHoldings = auto;
       saveState(); // 끄면 저장돼 있던 보유 종목이 여기서 지워져요
       saveHistCache(); // 과거 가격 캐시도 같은 스위치를 따라요
       ui.settingsMsg.textContent = '적용했어요.';

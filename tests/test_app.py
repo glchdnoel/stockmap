@@ -447,7 +447,7 @@ with sync_playwright() as p:
     page = ctx.new_page()
     console = []
     page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
-    relay = {"calls": [], "hist": [], "mode": "ok"}
+    relay = {"calls": [], "hist": [], "mode": "ok", "holdings_calls": 0, "holdings": None}
     from urllib.parse import urlparse, parse_qs
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -458,6 +458,11 @@ with sync_playwright() as p:
                 "Access-Control-Allow-Methods": "GET", "Content-Type": "application/json"}
         if req.method == "OPTIONS":
             route.fulfill(status=204, headers=cors); return
+        if "/v1/holdings" in req.url:
+            relay["holdings_calls"] += 1
+            if relay["mode"] != "ok":
+                route.abort(); return
+            route.fulfill(status=200, headers=cors, body=json.dumps({"ok": True, "status": "", "holdings": relay["holdings"]})); return
         if "/v1/history" in req.url:
             relay["hist"].append((req.url, req.headers.get("x-stockmap-relay")))
             if relay["mode"] == "down":
@@ -477,6 +482,7 @@ with sync_playwright() as p:
         if relay["mode"] == "auth":
             route.fulfill(status=401, headers=cors, body=""); return
         body = {"ok": True, "status": "", "fetchedAt": "2026-11-13T10:00:00+09:00",
+                "indices": [{"symbol": "KOSPI", "price": 2812.45, "prevClose": 2800, "at": "2026-11-13T15:30:00+09:00"}],
                 "prices": [{"symbol": "000660", "price": 1233000, "at": "2026-11-13T10:00:00+09:00", "prevClose": 1200000},
                            {"symbol": "999999", "price": 5, "prevClose": 1},          # 요청 안 한 종목 → 무시
                            {"symbol": "005930", "price": "<b>", "prevClose": None}]}  # 이상한 값 → 무시
@@ -485,6 +491,7 @@ with sync_playwright() as p:
     page.goto(BASE)
     kr = [{"symbol": "000660", "currency": "KRW", "shares": 2, "avgPrice": 1000000, "group": "한국", "manualPrice": 1200000, "name": "SK하이닉스"},
           {"symbol": "005930", "currency": "KRW", "shares": 30, "avgPrice": 60000, "group": "한국", "manualPrice": 70000}]
+    relay["holdings"] = kr  # 중계가 주는 보유 종목도 같게 (자동 받기가 목록을 바꾸지 않음)
     page.evaluate("h => localStorage.setItem('stockmap.v1', JSON.stringify({settings: {rememberHoldings: true}, holdings: h}))", kr)
     page.reload(); page.wait_for_timeout(2500)
     check("중계 토큰 없으면 127.0.0.1로 요청 안 함", not relay["calls"], str(relay["calls"]))
@@ -498,6 +505,10 @@ with sync_playwright() as p:
     page.click("[data-close=settingsDlg]"); page.wait_for_timeout(3000)
     pct = page.text_content(".leaf[data-symbol='000660'] .pct")
     check("중계 가격 반영 (1,233,000 vs 전일 1,200,000 → +2.75%)", pct == "+2.75%", pct)
+    check("코스피 지수 표시 (2,812.45, 전일 2,800 → +0.44%, 초록)", page.text_content("#kospiPill") == "코스피 2,812.45 +0.44%"
+          and "up" in page.get_attribute("#kospiPill", "class"), page.text_content("#kospiPill"))
+    check("위쪽에 환율 표시", page.text_content("#fxPill").startswith("USD/KRW "), page.text_content("#fxPill"))
+    check("보유 종목 자동 받기 1번(5분 간격)", relay["holdings_calls"] == 1, str(relay["holdings_calls"]))
     check("중계 배지 '국내 실시간'", page.text_content("#relay") == "국내 실시간" and page.is_visible("#relay"), page.text_content("#relay"))
     check("이상한 중계 값은 무시(수동 가격 유지)", page.text_content(".leaf[data-symbol='005930'] .pct") == "수동 가격", page.text_content(".leaf[data-symbol='005930'] .pct"))
     q = [parse_qs(urlparse(u).query) for u, _, _ in relay["calls"]]
@@ -542,6 +553,35 @@ with sync_playwright() as p:
     page.click("#deleteRelayBtn"); page.wait_for_timeout(300)
     n = len(relay["calls"]); page.wait_for_timeout(3000)
     check("중계 토큰 삭제하면 요청 멈춤·배지 숨김", len(relay["calls"]) == n and not page.is_visible("#relay"), f"{n} → {len(relay['calls'])}")
+    check("중계가 꺼지면 코스피 숨김", page.text_content("#kospiPill") == "코스피 —", page.text_content("#kospiPill"))
+    ctx.close()
+
+    # 13) 보유 종목이 비어 있으면 맥 중계에서 받아 오기 (JSON 가져오기 없이)
+    ctx = b.new_context(viewport={"width": 1280, "height": 720})
+    page = ctx.new_page()
+    relay.update({"calls": [], "hist": [], "mode": "ok", "holdings_calls": 0,
+                  "holdings": [{"symbol": "000660", "currency": "KRW", "shares": 3, "avgPrice": 1200000, "group": "한국", "manualPrice": 1233000, "name": "SK하이닉스"},
+                               {"symbol": "<script>", "currency": "KRW", "shares": 1, "avgPrice": 1}]})
+    page.route("http://127.0.0.1:18765/**", relay_route)
+    page.goto(BASE)
+    page.evaluate("t => localStorage.setItem('stockmap.relaytoken', t)", RT)
+    page.reload(); page.wait_for_timeout(3500)
+    syms = page.eval_on_selector_all(".leaf", "els => els.map(e => e.dataset.symbol)")
+    check("빈 화면에서 중계 보유 종목으로 시작(예시 화면 아님)", syms == ["000660"], str(syms))
+    check("받은 종목도 가격 반영", page.text_content(".leaf[data-symbol='000660'] .pct").endswith("%"), page.text_content(".leaf[data-symbol='000660'] .pct"))
+    check("기억하기 꺼져 있으면 받은 종목도 저장 안 함", "holdings" not in json.loads(page.evaluate("() => localStorage.getItem('stockmap.v1') || '{}'")),
+          page.evaluate("() => localStorage.getItem('stockmap.v1')"))
+    page.click("#settingsBtn")
+    check("자동 받기 기본 켜짐", page.is_checked("#fAutoHoldings"))
+    page.uncheck("#fAutoHoldings"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    page.click("[data-close=settingsDlg]")
+    relay["holdings"] = [{"symbol": "005930", "currency": "KRW", "shares": 1, "avgPrice": 1}]
+    page.evaluate("() => { const d = JSON.parse(localStorage.getItem('stockmap.v1')); d.holdings = [{symbol: 'VOO', currency: 'USD', shares: 1, avgPrice: 1}]; d.settings.rememberHoldings = true; localStorage.setItem('stockmap.v1', JSON.stringify(d)); }")
+    n = relay["holdings_calls"]
+    page.reload(); page.wait_for_timeout(3000)
+    syms = page.eval_on_selector_all(".leaf", "els => els.map(e => e.dataset.symbol)")
+    check("자동 받기 끄면 중계 종목으로 안 바꿈", syms == ["VOO"] and relay["holdings_calls"] == n, f"{syms}, calls {n} → {relay['holdings_calls']}")
+    check("미국 종목만 있어도 코스피는 표시", page.text_content("#kospiPill").startswith("코스피 2,812.45"), page.text_content("#kospiPill"))
     ctx.close()
     b.close()
 

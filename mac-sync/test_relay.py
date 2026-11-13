@@ -30,8 +30,25 @@ class FakeToss:
         self.daily_page_limit = daily_page_limit
         self.reject_adjusted = reject_adjusted
 
-    def __call__(self, method, path, *, token=None, form=None, query=None):
-        self.calls.append((method, path, token, dict(query or {}), dict(form or {})))
+    def __call__(self, method, path, *, token=None, form=None, query=None, account_seq=None):
+        self.calls.append((method, path, token, dict(query or {}), dict(form or {}), account_seq))
+        if path == "/api/v1/market-indicators/prices":
+            return {"result": [{"symbol": "KOSPI", "timestamp": "2026-11-13T15:30:00+09:00", "lastPrice": "2812.45"}]}
+        if path == "/api/v1/market-indicators/KOSPI/candles":
+            return {"result": {"candles": [
+                {"timestamp": "2026-11-13T00:00:00+09:00", "closePrice": "2812.45"},
+                {"timestamp": "2026-11-12T00:00:00+09:00", "closePrice": "2800.00"}], "nextBefore": None}}
+        if path == "/api/v1/accounts":
+            return {"result": [{"accountNo": "123-45-678901", "accountSeq": 1, "accountType": "BROKERAGE"},
+                               {"accountNo": "999-99-999999", "accountSeq": 2, "accountType": "ISA"}]}
+        if path == "/api/v1/holdings":
+            items = {1: [{"symbol": "000660", "name": "SK하이닉스", "marketCountry": "KR", "currency": "KRW",
+                          "quantity": "1", "averagePurchasePrice": "1300000", "lastPrice": "1233000"}],
+                     2: [{"symbol": "000660", "name": "SK하이닉스", "marketCountry": "KR", "currency": "KRW",
+                          "quantity": "1", "averagePurchasePrice": "1100000", "lastPrice": "1233000"},
+                         {"symbol": "VOO", "marketCountry": "US", "currency": "USD",
+                          "quantity": "2", "averagePurchasePrice": "500", "lastPrice": "520"}]}[account_seq]
+            return {"result": {"items": items}}
         if path == "/oauth2/token":
             return {"access_token": f"jwt{len(self.calls)}", "token_type": "Bearer", "expires_in": 86400}
         if path == "/api/v1/prices":
@@ -143,13 +160,13 @@ class RelayHTTPTest(unittest.TestCase):
             self.assertEqual(res.status, 401, t)
 
     def test_bad_symbols_rejected(self):
-        for q in ("", "symbols=", "symbols=AAPL", "symbols=00066", "symbols=000660;rm",
+        for q in ("symbols=AAPL", "symbols=00066", "symbols=000660;rm",
                   "symbols=" + ",".join(f"{i:06d}" for i in range(51))):
             res, _ = self.req(path="/v1/prices?" + q)
             self.assertEqual(res.status, 400, q)
 
     def test_other_paths_and_methods_rejected(self):
-        self.assertEqual(self.req(path="/v1/holdings")[0].status, 404)
+        self.assertEqual(self.req(path="/v1/orders")[0].status, 404)
         self.assertEqual(self.req(path="/")[0].status, 404)
         self.assertEqual(self.req(method="POST")[0].status, 405)
         self.assertEqual(self.req(method="DELETE")[0].status, 405)
@@ -162,6 +179,28 @@ class RelayHTTPTest(unittest.TestCase):
         for q in ("symbol=000660&kind=hack", "symbol=AAPL&kind=daily", "kind=daily", "symbol=000660%0A&kind=daily"):
             self.assertEqual(self.req(path="/v1/history?" + q)[0].status, 400, q)
         self.assertEqual(self.req(path="/v1/history?symbol=000660&kind=daily", headers={"X-Stockmap-Relay": "b" * 40})[0].status, 401)
+
+    def test_index_only_request(self):
+        res, _ = self.req(path="/v1/prices?symbols=")
+        self.assertEqual(res.status, 200)               # 종목 없이 코스피만 요청해도 돼요
+        self.feed.poll_once()
+        _, body = self.req(path="/v1/prices")
+        j = json.loads(body)
+        self.assertEqual(j["indices"], [{"symbol": "KOSPI", "price": 2812.45, "at": "2026-11-13T15:30:00+09:00", "prevClose": 2800.0}])
+
+    def test_holdings_endpoint(self):
+        with mock.patch.object(r.time, "sleep", lambda s: None):
+            res, body = self.req(path="/v1/holdings")
+        self.assertEqual(res.status, 200)
+        j = json.loads(body)
+        self.assertTrue(j["ok"])
+        by = {h["symbol"]: h for h in j["holdings"]}
+        self.assertEqual(by["000660"]["shares"], 2.0)          # 두 계좌 합침
+        self.assertEqual(by["000660"]["avgPrice"], 1200000.0)  # 가중 평균
+        self.assertEqual(by["VOO"]["currency"], "USD")
+        self.assertNotIn("123-45", body.decode())               # 계좌번호는 안 나가요
+        self.assertNotIn("accountNo", body.decode())
+        self.assertEqual(self.req(path="/v1/holdings", headers={"X-Stockmap-Relay": "b" * 40})[0].status, 401)
 
     def test_preflight(self):
         res, _ = self.req(method="OPTIONS", headers={"X-Stockmap-Relay": None,
@@ -185,7 +224,8 @@ class FeedTest(unittest.TestCase):
         feed.poll_once()
         feed.poll_once()
         paths = {c[1] for c in toss.calls}
-        self.assertEqual(paths, {"/oauth2/token", "/api/v1/prices", "/api/v1/candles"})
+        self.assertEqual(paths, {"/oauth2/token", "/api/v1/prices", "/api/v1/candles",
+                                 "/api/v1/market-indicators/prices", "/api/v1/market-indicators/KOSPI/candles"})
         self.assertEqual(len([c for c in toss.calls if c[1] == "/oauth2/token"]), 1)  # 토큰 재사용
         self.assertEqual(len([c for c in toss.calls if c[1] == "/api/v1/candles"]), 1)  # 전일 종가는 캐시
         self.assertTrue(all(c[2] == "jwt1" for c in toss.calls if c[1] != "/oauth2/token"))
@@ -230,7 +270,32 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(h["values"], [])
 
     def test_toss_call_blocks_other_paths(self):
-        for m, p in (("GET", "/api/v1/holdings"), ("GET", "/api/v1/accounts"), ("POST", "/api/v1/orders")):
+        for m, p in (("GET", "/api/v1/assets"), ("POST", "/api/v1/accounts"), ("POST", "/api/v1/orders")):
+            with self.assertRaises(r.RelayError):
+                r.toss_call(m, p, token="t")
+
+    def test_holdings_cached_and_account_header(self):
+        toss, feed = self.make()
+        with mock.patch.object(r.time, "sleep", lambda s: None):
+            feed.holdings(); feed.holdings()
+        seqs = [c[5] for c in toss.calls if c[1] == "/api/v1/holdings"]
+        self.assertEqual(seqs, [1, 2])                     # 1분 캐시 → 두 번째는 토스 호출 없음
+
+    def test_toss_call_sends_account_header(self):
+        seen = {}
+        class Res(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def fake_open(req, timeout=None):
+            seen.update(dict(req.header_items()))
+            return Res(b'{"result": {"items": []}}')
+        with mock.patch.object(r.OPENER, "open", fake_open):
+            r.toss_call("GET", "/api/v1/holdings", token="t", account_seq=3)
+        self.assertEqual(seen.get("X-tossinvest-account"), "3")
+
+    def test_orders_still_blocked(self):
+        for m, p in (("POST", "/api/v1/orders"), ("GET", "/api/v1/orders"), ("DELETE", "/api/v1/orders/1"),
+                     ("GET", "/api/v1/market-indicators/KOSDAQ/candles")):
             with self.assertRaises(r.RelayError):
                 r.toss_call(m, p, token="t")
 
