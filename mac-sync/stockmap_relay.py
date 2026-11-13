@@ -18,6 +18,7 @@
 
 실행 (mac-sync 폴더에서)
   python3 stockmap_relay.py            # 시작. 처음엔 중계 토큰을 만들어 보여줘요
+  python3 stockmap_relay.py --open     # 시작하고 크롬으로 스톡맵 열기 ('스톡맵 중계 켜기.command'가 이렇게 실행해요)
   python3 stockmap_relay.py token      # 중계 토큰 다시 보기
   python3 stockmap_relay.py new-token  # 중계 토큰 새로 만들기 (예전 토큰은 무효)
   끝내기: 터미널에서 Ctrl + C
@@ -29,6 +30,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +46,7 @@ KST = timezone(timedelta(hours=9))
 PORT = 18765
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 DEFAULT_ORIGINS = {"https://glchdnoel.github.io"}
+APP_URL = "https://glchdnoel.github.io/stockmap/"
 TOKEN_FILE = Path.home() / ".stockmap" / "relay-token"
 TOKEN_RE = re.compile(r"^[0-9a-f]{40}$")
 SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")      # 국내 종목 코드 6자리 (예: 000660, 0167A0)
@@ -358,6 +361,7 @@ def main(argv=None):
         return 2
     p = argparse.ArgumentParser(description="스톡맵 맥 중계 프로그램 (국내 종목 시세, 조회 전용)")
     p.add_argument("command", nargs="?", default="run", choices=["run", "token", "new-token"])
+    p.add_argument("--open", action="store_true", help="중계가 켜지면 크롬으로 스톡맵을 열어요")
     p.add_argument("--allow-origin", action="append", default=[],
                    help="테스트용으로 허용할 웹앱 주소 추가 (예: http://localhost:8765)")
     a = p.parse_args(argv)
@@ -393,7 +397,12 @@ def main(argv=None):
     stop = threading.Event()
     threading.Thread(target=poll_loop, args=(feed, stop), daemon=True).start()
     print(f"중계 시작: http://127.0.0.1:{PORT} (이 맥 안에서만)")
-    print("스톡맵을 열어 두면 2초마다 국내 종목 가격을 받아요. 끝내려면 Ctrl + C")
+    print("스톡맵을 열어 두면 2초마다 국내 종목 가격을 받아요. 끝내려면 Ctrl + C (또는 이 창 닫기)")
+    if a.open:
+        # 크롬으로 열어요 (사파리는 https 페이지에서 이 맥 주소로 가는 요청을 막을 수 있어요)
+        r = subprocess.run(["/usr/bin/open", "-a", "Google Chrome", APP_URL], capture_output=True)
+        if r.returncode != 0:
+            print(f"크롬을 찾지 못했어요. 크롬에서 직접 여세요: {APP_URL}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
