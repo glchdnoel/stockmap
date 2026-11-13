@@ -226,6 +226,31 @@ class FeedTest(unittest.TestCase):
         self.assertIn("setup", str(cm.exception))
 
 
+class OpenAppTest(unittest.TestCase):
+    def run_with(self, ok_names):
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            name = cmd[2]
+            return mock.Mock(returncode=0 if name in ok_names else 1)
+        with mock.patch.object(r.subprocess, "run", fake_run), mock.patch("builtins.print"):
+            return r.open_app(), calls
+
+    def test_prefers_installed_app(self):
+        got, calls = self.run_with({"스톡맵 - 내 포트폴리오", "Google Chrome"})
+        self.assertEqual(got, "스톡맵 - 내 포트폴리오")
+        self.assertEqual(len(calls), 1)
+
+    def test_falls_back_to_chrome_tab(self):
+        got, calls = self.run_with({"Google Chrome"})
+        self.assertEqual(got, "Google Chrome")
+        self.assertEqual(calls[-1], ["/usr/bin/open", "-a", "Google Chrome", r.APP_URL])
+
+    def test_nothing_found(self):
+        got, _ = self.run_with(set())
+        self.assertIsNone(got)
+
+
 class TokenFileTest(unittest.TestCase):
     def test_token_file_private_and_stable(self):
         with tempfile.TemporaryDirectory() as d:

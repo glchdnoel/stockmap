@@ -47,6 +47,7 @@ PORT = 18765
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 DEFAULT_ORIGINS = {"https://glchdnoel.github.io"}
 APP_URL = "https://glchdnoel.github.io/stockmap/"
+APP_NAMES = ("스톡맵 - 내 포트폴리오", "스톡맵")  # 크롬 '앱으로 설치' 했을 때의 이름 (manifest의 name / short_name)
 TOKEN_FILE = Path.home() / ".stockmap" / "relay-token"
 TOKEN_RE = re.compile(r"^[0-9a-f]{40}$")
 SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")      # 국내 종목 코드 6자리 (예: 000660, 0167A0)
@@ -355,6 +356,18 @@ def poll_loop(feed, stop):
         stop.wait(POLL_SECONDS)
 
 
+def open_app():
+    """크롬에 설치한 스톡맵 앱이 있으면 그걸, 없으면 크롬 탭으로 열어요.
+    (사파리는 https 페이지에서 이 맥 주소로 가는 요청을 막을 수 있어서 크롬만 써요)"""
+    for name in APP_NAMES:
+        if subprocess.run(["/usr/bin/open", "-a", name], capture_output=True).returncode == 0:
+            return name
+    if subprocess.run(["/usr/bin/open", "-a", "Google Chrome", APP_URL], capture_output=True).returncode == 0:
+        return "Google Chrome"
+    print(f"크롬을 찾지 못했어요. 크롬에서 직접 여세요: {APP_URL}")
+    return None
+
+
 def main(argv=None):
     if sys.platform != "darwin" and os.environ.get("STOCKMAP_SYNC_TEST") != "1":
         print("이 프로그램은 macOS 전용이에요 (키체인 사용).")
@@ -399,10 +412,7 @@ def main(argv=None):
     print(f"중계 시작: http://127.0.0.1:{PORT} (이 맥 안에서만)")
     print("스톡맵을 열어 두면 2초마다 국내 종목 가격을 받아요. 끝내려면 Ctrl + C (또는 이 창 닫기)")
     if a.open:
-        # 크롬으로 열어요 (사파리는 https 페이지에서 이 맥 주소로 가는 요청을 막을 수 있어요)
-        r = subprocess.run(["/usr/bin/open", "-a", "Google Chrome", APP_URL], capture_output=True)
-        if r.returncode != 0:
-            print(f"크롬을 찾지 못했어요. 크롬에서 직접 여세요: {APP_URL}")
+        open_app()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
