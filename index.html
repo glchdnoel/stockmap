@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- 보안: 이 페이지가 불러올 수 있는 것을 화이트리스트로 제한합니다 (SECURITY.md 참고) -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://glchdnoel.github.io/stockmap/; style-src 'self'; img-src 'self' data:; connect-src https://finnhub.io wss://ws.finnhub.io https://api.twelvedata.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://glchdnoel.github.io/stockmap/; style-src 'self'; img-src 'self' data:; connect-src https://finnhub.io wss://ws.finnhub.io https://api.twelvedata.com http://127.0.0.1:18765; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'">
   <meta name="referrer" content="no-referrer">
   <meta name="theme-color" content="#0f1115">
   <title>스톡맵 · 내 포트폴리오</title>
@@ -40,6 +40,7 @@
     <div class="spacer"></div>
     <span id="market" class="badge">-</span>
     <span id="conn" class="badge">-</span>
+    <span id="relay" class="badge" hidden></span>
     <span id="updated" class="muted">-</span>
     <span id="fxInfo" class="fx-info muted">-</span>
     <button id="manageBtn" class="btn" type="button">종목 관리</button>
@@ -104,6 +105,16 @@
         <input id="fTdKey" type="password" placeholder="API 키 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
         <button class="btn primary" type="submit">저장</button>
         <button id="deleteTdKeyBtn" class="btn danger" type="button">삭제</button>
+      </form>
+    </section>
+    <section class="setting">
+      <h3>맥 중계 토큰 (국내 종목 실시간)</h3>
+      <p class="muted small">맥에서 <code>python3 stockmap_relay.py</code>를 실행하면 나오는 40자리 토큰이에요. 국내 종목 가격을 이 맥 안의 중계 프로그램에서만 받아요. 토스 키가 아니에요.</p>
+      <p id="relayStatus" class="small"></p>
+      <form id="relayForm" class="row" autocomplete="off" novalidate>
+        <input id="fRelay" type="password" placeholder="중계 토큰 붙여넣기" autocomplete="off" spellcheck="false" maxlength="64">
+        <button class="btn primary" type="submit">저장</button>
+        <button id="deleteRelayBtn" class="btn danger" type="button">삭제</button>
       </form>
     </section>
     <section class="setting">

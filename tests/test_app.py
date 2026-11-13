@@ -441,6 +441,69 @@ with sync_playwright() as p:
             check("390px: 다른 곳을 탭하면 툴팁 닫힘", page.evaluate("() => document.getElementById('tooltip').hidden"))
             page.screenshot(path="./mobile.png")
         ctx.close()
+
+    # 12) 맥 중계 (국내 종목 시세) — 127.0.0.1:18765를 가짜로 흉내 내요
+    ctx = b.new_context(viewport={"width": 1280, "height": 720})
+    page = ctx.new_page()
+    console = []
+    page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
+    relay = {"calls": [], "mode": "ok"}
+    RT = "0123456789abcdef0123456789abcdef01234567"
+    def relay_route(route):
+        req = route.request
+        cors = {"Access-Control-Allow-Origin": f"http://localhost:{PORT}", "Access-Control-Allow-Headers": "X-Stockmap-Relay",
+                "Access-Control-Allow-Methods": "GET", "Content-Type": "application/json"}
+        if req.method == "OPTIONS":
+            route.fulfill(status=204, headers=cors); return
+        relay["calls"].append((req.url, req.headers.get("x-stockmap-relay"), req.headers.get("cookie")))
+        if relay["mode"] == "down":
+            route.abort(); return
+        if relay["mode"] == "auth":
+            route.fulfill(status=401, headers=cors, body=""); return
+        body = {"ok": True, "status": "", "fetchedAt": "2026-11-13T10:00:00+09:00",
+                "prices": [{"symbol": "000660", "price": 1233000, "at": "2026-11-13T10:00:00+09:00", "prevClose": 1200000},
+                           {"symbol": "999999", "price": 5, "prevClose": 1},          # 요청 안 한 종목 → 무시
+                           {"symbol": "005930", "price": "<b>", "prevClose": None}]}  # 이상한 값 → 무시
+        route.fulfill(status=200, headers=cors, body=json.dumps(body))
+    page.route("http://127.0.0.1:18765/**", relay_route)
+    page.goto(BASE)
+    kr = [{"symbol": "000660", "currency": "KRW", "shares": 2, "avgPrice": 1000000, "group": "한국", "manualPrice": 1200000, "name": "SK하이닉스"},
+          {"symbol": "005930", "currency": "KRW", "shares": 1, "avgPrice": 60000, "group": "한국", "manualPrice": 70000}]
+    page.evaluate("h => localStorage.setItem('stockmap.v1', JSON.stringify({settings: {rememberHoldings: true}, holdings: h}))", kr)
+    page.reload(); page.wait_for_timeout(2500)
+    check("중계 토큰 없으면 127.0.0.1로 요청 안 함", not relay["calls"], str(relay["calls"]))
+    check("중계 토큰 없으면 국내 종목은 수동 가격", page.text_content(".leaf[data-symbol='000660'] .pct") == "수동 가격", page.text_content(".leaf[data-symbol='000660'] .pct"))
+    check("미국 종목 없고 Finnhub 키 없으면 '미국 종목 없음'(키 오류 아님)", page.text_content("#conn") == "미국 종목 없음", page.text_content("#conn"))
+    page.click("#settingsBtn")
+    page.fill("#fRelay", "not-a-token"); page.click("#relayForm button[type=submit]")
+    check("잘못된 중계 토큰 거부", "형식" in page.text_content("#settingsMsg"), page.text_content("#settingsMsg"))
+    page.fill("#fRelay", RT); page.click("#relayForm button[type=submit]")
+    check("중계 토큰 저장 후 '저장됨'만 표시", page.text_content("#relayStatus") == "저장됨" and page.input_value("#fRelay") == "", page.text_content("#relayStatus"))
+    page.click("[data-close=settingsDlg]"); page.wait_for_timeout(3000)
+    pct = page.text_content(".leaf[data-symbol='000660'] .pct")
+    check("중계 가격 반영 (1,233,000 vs 전일 1,200,000 → +2.75%)", pct == "+2.75%", pct)
+    check("중계 배지 '국내 실시간'", page.text_content("#relay") == "국내 실시간" and page.is_visible("#relay"), page.text_content("#relay"))
+    check("이상한 중계 값은 무시(수동 가격 유지)", page.text_content(".leaf[data-symbol='005930'] .pct") == "수동 가격", page.text_content(".leaf[data-symbol='005930'] .pct"))
+    from urllib.parse import urlparse, parse_qs
+    q = [parse_qs(urlparse(u).query) for u, _, _ in relay["calls"]]
+    check("중계 요청엔 종목 코드만 (수량·평단 없음)", all(set(x) == {"symbols"} and x["symbols"] == ["000660,005930"] for x in q), str(q))
+    check("중계 요청에 토큰 헤더, 쿠키 없음", all(t == RT and c is None for _, t, c in relay["calls"]), str([(t == RT, c) for _, t, c in relay["calls"]]))
+    check("중계는 2초 간격", 1 <= len(relay["calls"]) <= 3, str(len(relay["calls"])))
+    page.click(".period-btn[data-period='1w']"); page.wait_for_timeout(1200)
+    check("국내 종목 1주 등락은 '데이터 없음'", page.text_content(".leaf[data-symbol='000660'] .pct") == "데이터 없음", page.text_content(".leaf[data-symbol='000660'] .pct"))
+    page.click(".period-btn[data-period='day']"); page.wait_for_timeout(500)
+    relay["mode"] = "auth"; page.wait_for_timeout(2500)
+    check("토큰이 틀리면 '중계 토큰 오류'", page.text_content("#relay") == "중계 토큰 오류", page.text_content("#relay"))
+    relay["mode"] = "down"; page.wait_for_timeout(7000)
+    check("중계가 꺼지면 '맥 중계 꺼짐'", page.text_content("#relay") == "맥 중계 꺼짐", page.text_content("#relay"))
+    check("CSP 위반 없음(중계)", not any("Content Security Policy" in c for c in console), str(console))
+    page.click("#settingsBtn"); page.uncheck("#fRemember"); page.click("#saveSettingsBtn"); page.wait_for_timeout(300)
+    st = page.evaluate("() => [localStorage.getItem('stockmap.relaytoken'), sessionStorage.getItem('stockmap.relaytoken') !== null]")
+    check("키 기억 끄면 중계 토큰도 세션에만", st == [None, True], str(st))
+    page.click("#deleteRelayBtn"); page.wait_for_timeout(300)
+    n = len(relay["calls"]); page.wait_for_timeout(3000)
+    check("중계 토큰 삭제하면 요청 멈춤·배지 숨김", len(relay["calls"]) == n and not page.is_visible("#relay"), f"{n} → {len(relay['calls'])}")
+    ctx.close()
     b.close()
 
 server.shutdown()

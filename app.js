@@ -4,7 +4,8 @@
  * 보안 원칙 (자세한 내용은 SECURITY.md)
  *  1. 외부에서 들어온 문자열은 절대 innerHTML로 넣지 않는다 → textContent만 사용
  *  2. 사용자 입력·저장 데이터·API 응답은 모두 형식 검사 후 사용한다
- *  3. API 키는 이 브라우저 localStorage에만 저장하고, finnhub.io 외에는 보내지 않는다
+ *  3. API 키는 이 브라우저 localStorage에만 저장하고, 각 키의 업체(finnhub.io, api.twelvedata.com) 외에는 보내지 않는다
+ *     맥 중계 토큰은 이 맥 안(127.0.0.1)의 중계 프로그램에만 보낸다. 증권사 키는 웹앱에 절대 넣지 않는다
  *  4. eval / new Function / 인라인 스크립트를 쓰지 않는다 (CSP로도 차단)
  */
 (function () {
@@ -45,11 +46,19 @@
   const DAILY_BARS = 800; // 약 3년치 거래일 (요청 1건 = 무료 한도 1건, 길이와 무관)
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const DATETIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/;
+  // 맥 중계 (국내 종목 시세). 토스 키는 맥 키체인에만 있고, 웹앱은 이 맥 안의 중계 프로그램에서 가격 숫자만 받아요.
+  const RELAY_URL = 'http://127.0.0.1:18765/v1/prices';
+  const RELAY_KEY_KEY = 'stockmap.relaytoken';
+  const RELAY_TOKEN_RE = /^[0-9a-f]{40}$/;
+  const KR_SYMBOL_RE = /^[0-9A-Z]{6}$/;
+  const RELAY_POLL = 2000;      // 2초마다 (중계 프로그램도 2초마다 토스에서 받아요)
+  const RELAY_TIMEOUT = 5000;
+  const MAX_RELAY_RESPONSE = 50000;
 
   const $ = (id) => document.getElementById(id);
   const ui = {
     map: $('map'), total: $('total'), today: $('today'), market: $('market'), conn: $('conn'),
-    updated: $('updated'), fxInfo: $('fxInfo'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
+    updated: $('updated'), relay: $('relay'), fxInfo: $('fxInfo'), banner: $('banner'), tooltip: $('tooltip'), maskBtn: $('maskBtn'),
     manageDlg: $('manageDlg'), settingsDlg: $('settingsDlg'), addForm: $('addForm'),
     formMsg: $('formMsg'), holdingsBody: $('holdingsBody'), importFile: $('importFile'),
     keyForm: $('keyForm'), fKey: $('fKey'), keyStatus: $('keyStatus'), settingsMsg: $('settingsMsg'),
@@ -134,6 +143,7 @@
     intraday: new Map(),  // symbol -> { fetchedAt, bars: [[분 단위 시각, close, 'MM/DD HH:MM'], ...] (최신순) }
     histUnsupported: new Set(),
     demoBases: {},
+    relay: { timer: null, status: 'off', fails: 0, gen: 0 }, // 맥 중계 상태
     fx: { status: 'idle', rate: null, at: null, reason: '' }, // 이번에 연 앱에서 자동으로 받은 환율
   };
 
@@ -178,6 +188,10 @@
   function removeKey(name) { storeRemove(name); sessRemove(name); }
   function getApiKey() { return readKey(API_KEY_KEY); }
   function getTdKey() { return readKey(TD_KEY_KEY); }
+  function getRelayToken() {
+    const t = storeGet(RELAY_KEY_KEY) || sessGet(RELAY_KEY_KEY);
+    return t && RELAY_TOKEN_RE.test(t) ? t : null;
+  }
   // 일봉 캐시 (가격 숫자만 저장, 형식 검사 후 사용)
   function loadHistCache() {
     const raw = storeGet(HIST_KEY);
@@ -408,6 +422,7 @@
   }
   function leafStatus(r) {
     if (!r.live) return r.h.manualPrice ? '수동 가격' : '시세 없음';
+    if (state.settings.period !== 'day' && r.h.currency === 'KRW') return '데이터 없음'; // 국내 종목 과거 가격은 아직 없음
     if (r.base && r.base.missing) return '기간 부족';
     if (state.settings.period !== 'day' && state.histUnsupported.has(r.h.symbol)) return '데이터 없음';
     if (state.settings.period !== 'day' && !getTdKey()) return '키 필요';
@@ -630,6 +645,103 @@
     clearTimeout(state.wsTimer);
     if (state.ws) { try { state.ws.close(); } catch (e) { /* ignore */ } state.ws = null; }
   }
+
+  // ---------------------------------------------------------------------------
+  // 맥 중계 (국내 종목 시세) — 이 맥 안(127.0.0.1)의 중계 프로그램에만 요청해요
+  // ---------------------------------------------------------------------------
+  function relaySymbols() {
+    return state.holdings.filter((h) => h.currency === 'KRW' && KR_SYMBOL_RE.test(h.symbol)).map((h) => h.symbol);
+  }
+  function setRelayBadge(status, detail) {
+    state.relay.status = status;
+    const map = {
+      off: ['', ''], live: ['국내 실시간', 'live'], wait: ['맥 중계 연결 중…', 'warn'],
+      down: ['맥 중계 꺼짐', 'bad'], auth: ['중계 토큰 오류', 'bad'], toss: ['맥 중계: 토스 오류', 'bad'],
+    };
+    const [text, kind] = map[status] || map.off;
+    ui.relay.hidden = !text;
+    ui.relay.textContent = text;
+    ui.relay.className = 'badge' + (kind ? ' ' + kind : '');
+    ui.relay.title = detail || '';
+  }
+  async function fetchRelay(token, symbols) {
+    const url = new URL(RELAY_URL);
+    url.searchParams.set('symbols', symbols.join(','));
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), RELAY_TIMEOUT);
+    try {
+      const res = await fetch(url.toString(), {
+        method: 'GET', mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', redirect: 'error',
+        headers: { 'X-Stockmap-Relay': token }, signal: ctl.signal,
+      });
+      if (res.status === 401) throw Object.assign(new Error('중계 토큰이 맞지 않아요.'), { auth: true });
+      if (!res.ok) throw new Error('중계 응답 오류 ' + res.status);
+      const text = await res.text();
+      if (text.length > MAX_RELAY_RESPONSE) throw new Error('응답이 너무 커요.');
+      const j = JSON.parse(text);
+      if (!j || typeof j !== 'object' || !Array.isArray(j.prices)) throw new Error('응답 형식 오류');
+      return j;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  function applyRelay(j, symbols) {
+    const wanted = new Set(symbols);
+    let changed = false;
+    for (const p of j.prices.slice(0, MAX_HOLDINGS)) {
+      if (!p || typeof p !== 'object' || typeof p.symbol !== 'string' || !wanted.has(p.symbol)) continue;
+      const price = Number(p.price);
+      if (!Number.isFinite(price) || price <= 0 || price > 1e10) continue;
+      const pc = p.prevClose == null ? null : Number(p.prevClose);
+      const prevClose = Number.isFinite(pc) && pc > 0 && pc <= 1e10 ? pc : null;
+      const prev = state.quotes.get(p.symbol);
+      if (!prev || prev.price !== price || prev.prevClose !== prevClose) changed = true;
+      state.quotes.set(p.symbol, { supported: true, price, prevClose, lastTrade: Date.now(), source: 'relay' });
+    }
+    if (changed) { state.layoutDirty = true; scheduleRender(false); }
+  }
+  async function relayTick(runId, gen) {
+    const stale = () => runId !== state.runId || gen !== state.relay.gen; // 다시 시작했으면 예전 반복은 멈춰요
+    if (stale()) return;
+    const token = getRelayToken();
+    const symbols = relaySymbols();
+    if (!token || !symbols.length) { setRelayBadge('off'); return; }
+    if (!document.hidden) { // 탭을 안 보고 있으면 쉬어요 (토스 호출도 같이 멈춰요)
+      try {
+        const j = await fetchRelay(token, symbols);
+        if (stale()) return;
+        applyRelay(j, symbols);
+        state.relay.fails = 0;
+        if (j.ok) setRelayBadge('live', j.fetchedAt ? '맥 중계 · ' + String(j.fetchedAt).slice(11, 19) + ' 기준' : '');
+        else setRelayBadge('toss', cleanText(j.status, 120));
+      } catch (e) {
+        if (stale()) return;
+        state.relay.fails++;
+        if (e.auth) setRelayBadge('auth', '설정에서 중계 토큰을 다시 넣어 주세요.');
+        else setRelayBadge(state.relay.fails >= 2 ? 'down' : 'wait', '맥에서 python3 stockmap_relay.py 를 실행하세요.');
+      }
+    }
+    if (stale()) return;
+    const wait = state.relay.fails >= 2 ? Math.min(30000, RELAY_POLL * state.relay.fails) : RELAY_POLL;
+    state.relay.timer = setTimeout(() => relayTick(runId, gen), wait);
+  }
+  function startRelay(runId) {
+    clearTimeout(state.relay.timer);
+    state.relay.gen++;
+    state.relay.fails = 0;
+    if (!getRelayToken() || !relaySymbols().length) { setRelayBadge('off'); return; }
+    setRelayBadge('wait');
+    relayTick(runId, state.relay.gen);
+  }
+  function stopRelay() {
+    state.relay.gen++;
+    clearTimeout(state.relay.timer);
+    state.relay.timer = null;
+    setRelayBadge('off');
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && state.mode === 'live' && state.relay.status !== 'off') startRelay(state.runId);
+  });
 
   // ---------------------------------------------------------------------------
   // 과거 가격 (Twelve Data) — 한도를 지키는 대기열
@@ -882,6 +994,7 @@
     state.runId++;
     const runId = state.runId;
     closeWS();
+    stopRelay();
     state.timers.forEach(clearInterval);
     state.timers = [];
     state.quotes.clear();
@@ -891,11 +1004,13 @@
     state.mode = state.settings.demo || state.holdings.length === 0 ? 'demo' : 'live';
     if (state.mode === 'demo') { startDemo(runId); return; }
 
+    startRelay(runId); // 국내 종목은 Finnhub 키와 상관없이 맥 중계로 받아요
     const key = getApiKey();
     scheduleRender(true);
+    const hasUsd = state.holdings.some((h) => h.currency === 'USD');
     if (!key) {
-      setConn('API 키 없음', 'bad');
-      showBanner('설정에서 Finnhub 키를 넣으면 등락이 표시돼요.');
+      setConn(hasUsd ? 'API 키 없음' : '미국 종목 없음', hasUsd ? 'bad' : '');
+      if (hasUsd) showBanner('설정에서 Finnhub 키를 넣으면 등락이 표시돼요.');
       return;
     }
     if (!storageOk) showBanner('이 브라우저는 저장소를 쓸 수 없어 새로고침하면 데이터가 사라져요.', true);
@@ -998,7 +1113,25 @@
     ui.keyStatus.textContent = k ? '저장됨' : '저장된 키 없음';
     const t = getTdKey();
     $('tdKeyStatus').textContent = t ? '저장됨' : '저장된 키 없음';
+    $('relayStatus').textContent = getRelayToken() ? '저장됨' : '저장된 토큰 없음';
   }
+  $('relayForm').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const input = $('fRelay');
+    const t = input.value.trim().toLowerCase();
+    input.value = '';
+    if (!RELAY_TOKEN_RE.test(t)) { ui.settingsMsg.textContent = '중계 토큰 형식이 올바르지 않아요 (40자리, 0-9 a-f).'; return; }
+    writeKey(RELAY_KEY_KEY, t);
+    renderKeyStatus();
+    ui.settingsMsg.textContent = '중계 토큰을 저장했어요.';
+    restart();
+  });
+  $('deleteRelayBtn').addEventListener('click', () => {
+    removeKey(RELAY_KEY_KEY);
+    renderKeyStatus();
+    ui.settingsMsg.textContent = '중계 토큰을 삭제했어요.';
+    restart();
+  });
   $('tdKeyForm').addEventListener('submit', (ev) => {
     ev.preventDefault();
     const input = $('fTdKey');
@@ -1047,7 +1180,7 @@
   });
   $('wipeBtn').addEventListener('click', () => {
     if (!window.confirm('키, 보유 종목, 저장된 가격을 이 기기에서 모두 지울까요? 되돌릴 수 없어요.')) return;
-    for (const k of [STORE_KEY, API_KEY_KEY, TD_KEY_KEY, HIST_KEY]) { storeRemove(k); sessRemove(k); }
+    for (const k of [STORE_KEY, API_KEY_KEY, TD_KEY_KEY, HIST_KEY, RELAY_KEY_KEY]) { storeRemove(k); sessRemove(k); }
     state.holdings = []; state.settings = validateSettings(null);
     state.daily.clear(); state.intraday.clear();
     state.fx = { status: 'idle', rate: null, at: null, reason: '' };
@@ -1062,10 +1195,11 @@
       state.settings.demo = $('fDemo').checked;
       const remember = $('fRemember').checked;
       if (remember !== state.settings.rememberKeys) {
-        const a = getApiKey(); const t = getTdKey();
+        const a = getApiKey(); const t = getTdKey(); const rt = getRelayToken();
         state.settings.rememberKeys = remember;
         if (a) writeKey(API_KEY_KEY, a);
         if (t) writeKey(TD_KEY_KEY, t);
+        if (rt) writeKey(RELAY_KEY_KEY, rt);
       }
       state.settings.rememberHoldings = $('fRememberHoldings').checked;
       saveState(); // 끄면 저장돼 있던 보유 종목이 여기서 지워져요
